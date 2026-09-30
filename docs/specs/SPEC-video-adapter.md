@@ -11,15 +11,15 @@
 
 ## 1. Objective & Responsibility
 
-The `video-adapter` module provides an experimental, opt-in adapter for Gemini Web video generation, exposed through an OpenAI-shaped generation request/response contract. It is registered as a plugin but **disabled by default**. If the adapter is disabled or the active upstream/account does not support the requested video pipeline, the service returns a clear `501 Not Implemented` response with an actionable reason rather than an unhandled `500 Internal Server Error`. If supported, generated video content is retrieved and cached locally, then returned via a bridge-proxied URL or base64 using the same basic response shape as image generation.
+The `video-adapter` module provides an experimental, opt-in adapter for Gemini Web video generation, exposed through an OpenAI-shaped generation request/response contract. It is registered as a plugin but **disabled by default**. If the adapter is disabled or the active upstream/account does not support the requested video pipeline, the service returns a clear `501 Not Implemented` response with an actionable reason rather than an unhandled `500 Internal Server Error`. If supported, generated video content is retrieved and cached locally, then returned via a bridge-proxied URL or base64 using the exact same response shape as image generation.
 
 **In scope:**
 - `POST /v1/videos/generations` request and response models with `prompt`, optional duration/format parameters, and URL/base64 result entries.
 - Experimental plugin registration controlled by an explicit configuration flag that defaults to `false`.
-- Dispatch to Gemini Web only through the `gemini-adapter` boundary.
+- Dispatch to Gemini Web through the `gemini-adapter` boundary.
 - Explicit disabled/unavailable capability error mapping to HTTP `501 Not Implemented`.
-- Extraction of supported upstream video result URL(s), secure retrieval, content-addressed caching via `media-store`, and stable local URL or `b64_json` output.
-- When supported, response object semantics compatible with image generation's `{created, data:[{url | b64_json}]}` pattern.
+- Extraction of supported upstream video result URL(s), secure retrieval, content-addressed caching via `media-store` (with MIME types such as `video/mp4`), and stable local URL or `b64_json` output.
+- When supported, response object semantics fully compatible with image generation's `{created, data:[{url | b64_json}]}` pattern.
 
 **Out of scope:**
 - Audio generation, audio transcription, TTS, speech capabilities, or audio/video combined generation (explicitly excluded).
@@ -43,14 +43,14 @@ use serde::{Deserialize, Serialize};
 pub struct VideoGenerationRequest {
     /// Text description of the video to generate.
     pub prompt: String,
-    /// Optional requested duration. Upstream support is capability-dependent.
+    /// Optional requested duration in seconds. Upstream support is capability-dependent.
     pub duration_seconds: Option<u32>,
     /// Output format: "url" (default) or "b64_json".
     pub response_format: Option<String>,
 }
 
-/// OpenAI-shaped response returned after generation completes.
-#[derive(Debug, Clone, Serialize)]
+/// OpenAI-shaped response returned after generation completes (matches image generation schema).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoGenerationResponse {
     /// Unix timestamp of result creation.
     pub created: i64,
@@ -58,9 +58,9 @@ pub struct VideoGenerationResponse {
     pub data: Vec<VideoResult>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoResult {
-    /// Bridge-proxied local retrieval URL, when response_format = "url".
+    /// Bridge-proxied local retrieval URL (`/v1/videos/{id}`), when response_format = "url".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Base64-encoded cached video bytes, when response_format = "b64_json".
@@ -105,8 +105,8 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait VideoAdapter: Send + Sync {
-    /// Generate a video using the Gemini adapter, retrieve/cache bytes, and return
-    /// a stable URL or b64_json according to the requested response format.
+    /// Generate a video using the Gemini adapter, retrieve/cache bytes in media-store,
+    /// and return a stable URL or b64_json according to the requested response format.
     async fn generate_video(
         &self,
         req: VideoGenerationRequest,
@@ -129,7 +129,7 @@ pub struct VideoConfig {
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/v1/videos/generations` | Same API-key policy as `/v1/images/generations` | Generate video or return `501 Not Implemented` if disabled/unavailable |
-| `GET` | `/v1/videos/{id}` | Same API-key policy as image retrieval | Retrieve cached video bytes with correct MIME type |
+| `GET` | `/v1/videos/{id}` | Same API-key policy as image retrieval | Retrieve cached video bytes with correct MIME type (e.g. `video/mp4`) |
 
 When video generation is disabled, the generation endpoint remains registered and returns an OpenAI-style JSON error envelope with status 501 and a clear error code/message. The API does not become an unrecognized-path 404. Existing server auth policy applies equally to the route regardless of capability enablement.
 
@@ -147,14 +147,14 @@ When video generation is disabled, the generation endpoint remains registered an
    - Missing capability is not a server fault; it must never become generic HTTP 500.
    - Error JSON is actionable and distinguishes `disabled` from `not_implemented`.
 
-3. **Supported Generation Response:**
-   - When enabled and supported, extract the upstream result, retrieve the video bytes, and cache them through `media-store` with correct video MIME metadata.
-   - `response_format = "url"` returns only a stable bridge URL (never an upstream expiring URL).
+3. **Supported Generation Response & Media Caching:**
+   - When enabled and supported, extract the upstream result, retrieve the video bytes, and cache them through `MediaStore::put` with MIME type `video/mp4` (or `video/webm`).
+   - `response_format = "url"` returns only a stable bridge URL (`/v1/videos/{id}`).
    - `response_format = "b64_json"` returns base64-encoded cached bytes.
    - Exactly one of `url` or `b64_json` is populated for each result.
 
 4. **Media Retrieval:**
-   - `GET /v1/videos/{id}` serves only locally cached media by opaque ID and returns the stored video MIME type.
+   - `GET /v1/videos/{id}` retrieves content bytes from `MediaStore::get` by opaque ID and returns the stored video MIME type.
    - Unknown IDs map to 404 through the shared API error contract.
 
 5. **No Audio/TTS Expansion:**
@@ -183,7 +183,7 @@ When video generation is disabled, the generation endpoint remains registered an
 - **Configuration Defaults:** Deserializing omitted `[video]` configuration yields `enabled = false`.
 - **Disabled Adapter:** Calling the route/service while disabled returns HTTP 501 with error code `disabled`; mock upstream observes no generation request.
 - **Unavailable Upstream:** Mock adapter returns unsupported capability → HTTP 501 with error code `not_implemented`, never 500.
-- **Supported Generation:** Mock adapter returns a video source; verify media bytes are cached and URL response contains a stable local URL.
+- **Supported Generation:** Mock adapter returns a video source; verify media bytes are cached in `media-store` and URL response contains a stable local URL.
 - **Base64 Response:** Verify `response_format = "b64_json"` yields decodable bytes identical to cached video content.
 - **Retrieval:** Cached ID returns exact bytes and video MIME type; unknown ID maps to 404.
 - **Response Shape:** URL and base64 modes each populate exactly one of `url`/`b64_json` and serialize using the image-generation-compatible `created`/`data` envelope.

@@ -120,6 +120,8 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChatChoiceDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_metadata: Option<serde_json::Value>, // Fase 3 extension (terminal chunk)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,7 +291,7 @@ pub enum OpenAiCompatError {
 
 1. `parse_model` returns the correct canonical alias and thinking level for all four base aliases and for `@think=0`, `@think=4`; rejects `@think=5`, unknown aliases, and malformed suffixes with `UnknownModel`.
 2. `ChatCompletionResponse` serializes to OpenAI JSON shape: `object: "chat.completion"`, `choices[0].message.role: "assistant"`, `finish_reason` present, `gemini_metadata` absent when `None`.
-3. `ChatCompletionChunk` serializes to `object: "chat.completion.chunk"` with `choices[0].delta.content` for text events and `finish_reason` for terminal events.
+3. `ChatCompletionChunk` serializes to `object: "chat.completion.chunk"` with `choices[0].delta.content` for text events and `finish_reason` for terminal events. The additive `gemini_metadata` field is absent on intermediate chunks and optional on the terminal chunk.
 4. `OpenAiErrorResponse` JSON always has `error.message`, `error.type`; `error.code` is null when not set.
 5. `list_models()` returns all four virtual model IDs; each entry has `object: "model"` and `owned_by: "google"`.
 6. Round-trip: a request JSON accepted by the OpenAI Python SDK can be deserialized into `ChatCompletionRequest` without loss of `messages`, `stream`, `temperature`, `max_tokens`.

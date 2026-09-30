@@ -14,11 +14,11 @@
 The `code-exec-surface` module extracts structured outputs from Gemini Web's code execution feature and web search grounding results. It attaches them to OpenAI-formatted responses as an optional, non-intrusive `gemini_metadata` extension field, leaving all standard OpenAI schema fields completely unmodified. Downstream clients that do not consume `gemini_metadata` remain fully compatible; clients that do can retrieve structured code execution output and source citations.
 
 **In scope:**
-- Parsing the `GeminiWebMetadata` carried in `gemini-adapter`'s `StreamChunk.metadata` and `Completion.metadata` into public typed extension structures.
-- Extracting code execution blocks: `language`, `code` (source), `stdout`, and `stderr`.
-- Extracting web search grounding citations: character start/end offsets, `uri`, and `title`.
-- Attaching extracted results to the `gemini_metadata` field of `ChatCompletionResponse` and `ChatCompletionChunk` (final terminating chunk only for streams).
-- Sanitizing citation URIs before serialization.
+- Parsing the `GeminiWebMetadata` carried in `gemini-adapter`'s `StreamChunk.metadata` and `Completion` into public typed extension structures.
+- Extracting code execution blocks: `language`, `code` (source), and execution `output` (mapped to `stdout`, and `stderr` when error channels are isolated).
+- Extracting web search grounding citations: character start/end offsets, sanitized `uri`, and `title`.
+- Attaching extracted results to the `gemini_metadata` field of `ChatCompletionResponse` (non-streaming) and `ChatCompletionChunk` (final terminating chunk only for streams).
+- Sanitizing citation URIs (enforcing HTTPS-only schemes) before serialization.
 - Treating all upstream metadata as best-effort: absent, partial, or malformed fields are silently omitted without failing the main completion response.
 
 **Out of scope:**
@@ -36,10 +36,9 @@ The `code-exec-surface` module extracts structured outputs from Gemini Web's cod
 
 ```rust
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 /// Top-level metadata extension field appended to OpenAI chat responses.
-/// Serialized as `gemini_metadata` at the root of the completion or final chunk.
+/// Serialized as `gemini_metadata` at the root of the completion or final stream chunk.
 /// All collections default to empty; absent when no metadata is extracted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GeminiMetadataExtension {
@@ -61,10 +60,10 @@ pub struct ExtractedCodeExecution {
     pub language: String,
     /// Source code submitted for execution.
     pub code: String,
-    /// Combined stdout output. Absent if execution produced no output.
+    /// Combined stdout output from code execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
-    /// Combined stderr output. Absent if execution produced no error output.
+    /// Combined stderr output. Populated if upstream isolates errors or on non-zero exit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
 }
@@ -94,8 +93,14 @@ use gemini_bridge_adapter_gemini::{CodeExecutionBlock, CitationRef, GeminiWebMet
 /// Silently skips any blocks or citations that fail sanitization or validation.
 pub fn extract_metadata(meta: &GeminiWebMetadata) -> Option<GeminiMetadataExtension>;
 
-/// Sanitize a citation URI. Returns the URI string if it is absolute HTTPS or HTTP,
-/// rejects `file://`, `javascript:`, data URIs, and other unsafe schemes.
+/// Map an adapter `CodeExecutionBlock` (which carries `language`, `code`, and `output`)
+/// into an `ExtractedCodeExecution`. The adapter's `output` maps to `stdout`;
+/// `stderr` remains `None` unless Gemini Web later exposes separate error output.
+pub fn map_code_execution(block: &CodeExecutionBlock) -> Option<ExtractedCodeExecution>;
+
+/// Sanitize a citation URI. Returns the URI string only if it is an absolute `https://` URL
+/// (or `http://localhost` for testing). Rejects insecure HTTP, `file://`, `javascript:`,
+/// data URIs, and malformed strings.
 pub fn sanitize_uri(raw: &str) -> Option<String>;
 ```
 
@@ -103,28 +108,37 @@ pub fn sanitize_uri(raw: &str) -> Option<String>;
 
 ## 3. Response Attachment Behavior
 
-### 3.1 Non-Streaming Responses
+### 3.1 Metadata Source
+
+The HTTP orchestration boundary receives `GeminiWebMetadata` from the Gemini adapter's
+streaming/non-streaming parser path. The public `llm-service::Completion` remains provider-neutral;
+its optional provider extension is represented as opaque `ProviderMetadata`. `code-exec-surface`
+is the only module that decodes that opaque value into `GeminiMetadataExtension`.
+
+### 3.2 Non-Streaming Responses
 
 For `POST /v1/chat/completions` (`stream: false`):
 ```
-gemini-adapter returns Completion { ..., metadata: Some(GeminiWebMetadata { ... }) }
+gemini-adapter returns response with GeminiWebMetadata
        │
        ▼
 code-exec-surface::extract_metadata(&metadata) → Some(GeminiMetadataExtension { ... })
        │
        ▼
 openai-compat serializes ChatCompletionResponse {
+    id: "chatcmpl-...",
+    choices: [...],
     ...,
-    gemini_metadata: Some(serialized GeminiMetadataExtension), // appended
+    gemini_metadata: Some(serde_json::to_value(extension)), // top-level extension
 }
 ```
 
-### 3.2 Streaming Responses
+### 3.3 Streaming Responses
 
 For `POST /v1/chat/completions` (`stream: true`):
-- Intermediate chunks (`delta`, partial content) contain only OpenAI standard SSE fields.
-- The **final terminal chunk** (identified by `is_finished: true` on the `StreamChunk`) carries the extracted `gemini_metadata` as an additional field on the final `ChatCompletionChunk`.
-- Clients that do not expect `gemini_metadata` on the final chunk remain compatible because the field is additive.
+- Intermediate chunks (`delta`, partial content) carry standard OpenAI SSE fields only.
+- The **final terminal chunk** (where `is_finished: true` on the `StreamChunk`) carries accumulated metadata in `gemini_metadata` on the final `ChatCompletionChunk`.
+- Clients that do not expect `gemini_metadata` on the final chunk remain fully compatible because the field is additive.
 
 ---
 
@@ -134,12 +148,12 @@ For `POST /v1/chat/completions` (`stream: true`):
    Standard OpenAI fields (`choices`, `usage`, `finish_reason`, `message.content`, `delta.content`) are **never modified** to embed metadata. `gemini_metadata` appears exclusively at the top level of the completion JSON object.
 
 2. **Safe Best-Effort Extraction:**
-   - Missing or null upstream metadata → `gemini_metadata` field omitted from response.
+   - Missing or null upstream metadata → `gemini_metadata` field omitted from response (`None`).
    - Single malformed code block or bad citation URI → that item is silently skipped; remaining valid items are still emitted.
    - Extraction failure never causes the response to fail, return 500, or be downgraded.
 
-3. **URI Sanitization Invariant:**
-   Only `https://` and `http://` scheme citations are serialized. `file://`, `javascript:`, `data:`, relative URIs, and any other schemes are rejected by `sanitize_uri` and the citation is silently omitted.
+3. **HTTPS-Only URI Sanitization Invariant:**
+   Only secure `https://` scheme citations (and `http://localhost` in test mode) are serialized. Insecure external `http://`, `file://`, `javascript:`, `data:`, relative URIs, and any other schemes are rejected by `sanitize_uri` and the citation is silently omitted.
 
 4. **Stream Metadata Timing:**
    Partial/intermediate streaming chunks carry no `gemini_metadata`. A single metadata attachment on the terminal chunk provides the full accumulated set of code execution and citation data from the entire response.
@@ -159,8 +173,8 @@ For `POST /v1/chat/completions` (`stream: true`):
 | PRD US-7 Acceptance Criterion | Module Specification Coverage |
 |---|---|
 | Code execution blocks (`code_stdout`) extracted to `gemini_metadata.code_execution[]`, not discarded | `ExtractedCodeExecution` with `language`, `code`, `stdout`, `stderr` fields; invariant 1 |
-| Citations/grounding returned in `gemini_metadata.citations[]` | `ExtractedCitation` with `start_index`, `end_index`, `uri`, `title`; URI sanitization invariant |
-| Extension fields are optional and do not break OpenAI compatibility | `#[serde(skip_serializing_if)]` on all collections; behavior invariant 1 & 5 |
+| Citations/grounding returned in `gemini_metadata.citations[]` | `ExtractedCitation` with `start_index`, `end_index`, `uri`, `title`; HTTPS sanitization invariant |
+| Extension fields are optional and do not break OpenAI compatibility | `#[serde(skip_serializing_if)]` on all collections; behavior invariants 1 & 5 |
 
 ---
 
@@ -169,17 +183,17 @@ For `POST /v1/chat/completions` (`stream: true`):
 ### 6.1 Unit Tests
 
 - **Extraction Tests (Fixture-Based):**
-  - Upstream payload with a single code execution block → correct `ExtractedCodeExecution` populated.
+  - Upstream payload with a single code execution block → correct `ExtractedCodeExecution` populated with `stdout`.
   - Upstream payload with multiple code blocks → all blocks extracted in order.
-  - Upstream payload with web search citations → `ExtractedCitation` array populated.
+  - Upstream payload with web search citations → `ExtractedCitation` array populated with valid HTTPS URIs.
   - Both code blocks and citations present → both extracted in same `GeminiMetadataExtension`.
   - Upstream payload with no metadata → `extract_metadata` returns `None`.
   - Partially malformed block (missing `language`) → that block skipped, others extracted.
-  - Citation with `file://` URI → citation omitted; `http://` URI → citation included.
+  - Insecure citation with `http://example.com` or `file:///etc/passwd` → citation omitted; `https://example.com` → citation included.
 
 - **URI Sanitization Tests:**
-  - Valid `https://` → accepted.
-  - Valid `http://` → accepted.
+  - Valid `https://google.com` → accepted.
+  - Insecure `http://google.com` → rejected (non-localhost HTTP rejected).
   - `file:///etc/passwd` → rejected.
   - `javascript:alert(1)` → rejected.
   - Relative path `../../../etc/passwd` → rejected.
@@ -192,24 +206,20 @@ For `POST /v1/chat/completions` (`stream: true`):
 
 ### 6.3 OpenAI SDK Compatibility Tests
 
-- Parse a `ChatCompletionResponse` containing `gemini_metadata` using the standard SDK deserialization (via a fixture); assert no deserialization errors and that known OpenAI fields are intact.
-
-### 6.4 Stream Metadata Timing Test
-
-- Use a multi-chunk stream fixture; assert `gemini_metadata` is absent on all intermediate chunks and present (once) on the final chunk.
+- Parse a `ChatCompletionResponse` containing `gemini_metadata` using standard SDK deserialization fixtures; assert no deserialization errors and that known OpenAI fields are intact.
 
 ---
 
 ## 7. Boundaries
 
-- **Always:** Attach metadata exclusively to the `gemini_metadata` extension field; sanitize citation URIs before serialization; treat missing or malformed metadata as best-effort and never fail the main response.
+- **Always:** Attach metadata exclusively to the `gemini_metadata` extension field; enforce HTTPS-only citation URIs; treat missing or malformed metadata as best-effort and never fail the main response.
 - **Ask First:** Promoting metadata fields into core `choices[0].message.content` or `finish_reason`; adding metadata fields beyond code execution and citations.
-- **Never:** Execute, evaluate, or relay upstream code locally; return audio/TTS output; cause a completion response to fail solely due to metadata extraction errors; serialize `file://`, `javascript:`, or data URIs in citations; modify standard OpenAI response fields.
+- **Never:** Execute, evaluate, or relay upstream code locally; return audio/TTS output; cause a completion response to fail solely due to metadata extraction errors; serialize insecure HTTP, `file://`, `javascript:`, or data URIs in citations; modify standard OpenAI response fields.
 
 ---
 
 ## 8. Implementation Reference
 
 - **Adapter Metadata Source:** `docs/specs/SPEC-gemini-adapter.md` (`GeminiWebMetadata`, `CodeExecutionBlock`, `CitationRef`, `StreamChunk.metadata`).
-- **OpenAI Schema Owner:** `docs/specs/SPEC-openai-compat.md` (`ChatCompletionResponse.gemini_metadata`, `ChatCompletionChunk.gemini_metadata`).
+- **OpenAI Schema Owner:** `docs/specs/SPEC-openai-compat.md` (`ChatCompletionResponse.gemini_metadata`, `ChatCompletionChunk`).
 - **Task Implementation:** Task 3.1 (`crates/code-exec-surface/src/lib.rs`, `extractor.rs`, `crates/openai-compat/src/metadata.rs`).
