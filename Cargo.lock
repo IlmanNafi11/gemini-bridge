@@ -680,6 +680,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gemini-bridge-media-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "gemini-bridge-openai-compat"
 version = "0.1.0"
 dependencies = [

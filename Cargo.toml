@@ -38,6 +38,7 @@ members = [
     "crates/gemini-adapter",
     "crates/openai-compat",
     "crates/http-server",
+    "crates/media-store",
 ]
 
 [workspace.package]
