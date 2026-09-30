@@ -43,7 +43,7 @@
   - Files: `docs/specs/SPEC-conversation-store.md`, `docs/specs/SPEC-health-admin.md`, `docs/specs/SPEC-gallery.md`
   - Depends on: P.5
 
-- [ ] **P.7: Specify advanced adapter capabilities** (`tool-calling`, `code-exec-surface`, `video-adapter`)
+- [x] **P.7: Specify advanced adapter capabilities** (`tool-calling`, `code-exec-surface`, `video-adapter`)
   - Acceptance: Specs define tool parsing/fallback, optional metadata, and off-by-default video/501 behavior with explicit phase boundaries.
   - Verify: Trace US-5, US-7, and US-9 acceptance criteria to these specs; ensure no audio/TTS scope is introduced.
   - Files: `docs/specs/SPEC-tool-calling.md`, `docs/specs/SPEC-code-exec-surface.md`, `docs/specs/SPEC-video-adapter.md`
