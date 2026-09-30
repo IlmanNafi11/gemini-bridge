@@ -13,6 +13,19 @@ clap = { workspace = true }
 tokio = { workspace = true }
 gemini-bridge-config = { path = "crates/config" }
 gemini-bridge-identity = { path = "crates/identity" }
+gemini-bridge-http-server = { path = "crates/http-server" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+wiremock = { workspace = true }
+axum = { workspace = true }
+gemini-bridge-config = { path = "crates/config" }
+gemini-bridge-identity = { path = "crates/identity" }
+gemini-bridge-adapter-gemini = { path = "crates/gemini-adapter" }
+gemini-bridge-openai-compat = { path = "crates/openai-compat" }
+gemini-bridge-http-server = { path = "crates/http-server" }
 
 [workspace]
 resolver = "2"
@@ -23,6 +36,8 @@ members = [
     "crates/identity",
     "crates/llm-service",
     "crates/gemini-adapter",
+    "crates/openai-compat",
+    "crates/http-server",
 ]
 
 [workspace.package]
@@ -49,3 +64,9 @@ sha1 = "0.10"
 serde_json = "1"
 futures = "0.3"
 insta = "1"
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
