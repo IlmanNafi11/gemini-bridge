@@ -55,31 +55,31 @@
 
 ## Fase 0 — Bootstrap: non-streaming chat
 
-- [ ] **Task 0.1: Establish Cargo workspace and plugin context**
+- [x] **Task 0.1: Establish Cargo workspace and plugin context**
   - Acceptance: Edition-2024 workspace and static registry build; typed service provide/inject and event dispatch modes have deterministic behavior and lifecycle disposers.
   - Verify: `cargo test -p gemini-bridge-plugin-context`; workspace clippy.
   - Files: `Cargo.toml`, `crates/plugin-context/Cargo.toml`, `crates/plugin-context/src/lib.rs`, `crates/plugin-context/src/event_bus.rs`, `crates/plugin-context/tests/di_test.rs`
   - Depends on: P.2
 
-- [ ] **Task 0.2: Implement TOML configuration and overrides**
+- [x] **Task 0.2: Implement TOML configuration and overrides**
   - Acceptance: Bind/config/storage/proxy/auth settings load from TOML; environment overrides take precedence; documented defaults and profile composition work.
   - Verify: `cargo test -p gemini-bridge-config` with precedence and invalid-config boundary cases.
   - Files: `crates/config/Cargo.toml`, `crates/config/src/lib.rs`, `crates/config/src/model.rs`, `bridge.example.toml`
   - Depends on: P.2
 
-- [ ] **Task 0.3: Implement outbound transport and TLS profile**
+- [x] **Task 0.3: Implement outbound transport and TLS profile**
   - Acceptance: Configured HTTP/SOCKS5 proxy and selected TLS fingerprint profile are applied by outbound client; implementation choice is validated against an actual Gemini Web request before closing task.
   - Verify: `cargo test -p gemini-bridge-transport`; mocked proxy/client integration plus live `doctor` probe with local credentials.
   - Files: `crates/transport/Cargo.toml`, `crates/transport/src/lib.rs`, `crates/transport/src/client.rs`, `crates/transport/src/tls.rs`
   - Depends on: Task 0.2
 
-- [ ] **Task 0.4: Implement identity bootstrap and local auth commands**
+- [x] **Task 0.4: Implement identity bootstrap and local auth commands**
   - Acceptance: `/app` bootstrap extracts required session tokens; cookie import and validation work; persisted credentials use 0600 permissions and optional configured encryption; secret values are not logged. `auth login` and `doctor` provide actionable outcomes.
   - Verify: `cargo test -p gemini-bridge-identity`; CLI tests with fixtures; live `doctor` is opt-in and uses credentials outside git.
   - Files: `crates/identity/Cargo.toml`, `crates/identity/src/lib.rs`, `crates/identity/src/session.rs`, `src/main.rs`, `src/cli.rs`
   - Depends on: Tasks 0.2, 0.3
 
-- [ ] **Task 0.5: Implement provider-neutral LLM contract and Gemini non-stream adapter**
+- [x] **Task 0.5: Implement provider-neutral LLM contract and Gemini non-stream adapter**
   - Acceptance: `llm-service` can carry normalized requests/results without Gemini-specific fields; Gemini adapter builds configured `f.req` and parses recorded response fixtures using schema map; parser failures are explicit and actionable.
   - Verify: `cargo test -p gemini-bridge-adapter-gemini`; `cargo insta test` against checked-in sanitized fixtures.
   - Files: `crates/llm-service/src/lib.rs`, `crates/gemini-adapter/Cargo.toml`, `crates/gemini-adapter/src/lib.rs`, `crates/gemini-adapter/src/f_req.rs`, `crates/gemini-adapter/src/parser.rs`
