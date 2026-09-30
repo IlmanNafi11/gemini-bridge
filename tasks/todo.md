@@ -91,7 +91,7 @@
   - Files: `schema/gemini-web.toml`, `crates/gemini-adapter/src/schema.rs`, `crates/gemini-adapter/src/self_check.rs`
   - Depends on: Task 0.5
 
-- [ ] **Task 0.7: Deliver OpenAI-compatible non-stream chat endpoint**
+- [x] **Task 0.7: Deliver OpenAI-compatible non-stream chat endpoint**
   - Acceptance: `POST /v1/chat/completions` supports required request fields/model aliases and returns OpenAI-shaped completion, usage and finish reason; `GET /v1/models` lists virtual models; configured bind/auth policy is enforced.
   - Verify: `cargo test -p gemini-bridge-http-server`; `cargo test --test e2e_chat_test` with mock upstream and an opt-in live smoke.
   - Files: `crates/openai-compat/src/lib.rs`, `crates/openai-compat/src/models.rs`, `crates/http-server/src/lib.rs`, `crates/http-server/src/handlers/chat.rs`, `tests/e2e_chat_test.rs`
