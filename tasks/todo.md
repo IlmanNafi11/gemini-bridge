@@ -8,7 +8,7 @@
 
 ## Preparation — Spec traceability and module contracts
 
-- [ ] **P.1: Reconcile root SPEC module count and dependency labels**
+- [x] **P.1: Reconcile root SPEC module count and dependency labels**
   - Acceptance: Root spec's stated module count matches its 18 listed capability rows; graph/module names and phase labels are consistent; any remaining architecture choice is recorded, not silently assumed.
   - Verify: Manually compare `SPEC.md` capability table, graph, project structure, and PRD roadmap.
   - Files: `SPEC.md`
