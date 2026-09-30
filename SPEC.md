@@ -36,7 +36,7 @@ Per `agent-skills:spec-driven-development` preparation, the system is decomposed
 | `config` | `gemini-bridge-config` | TOML parsing (`bridge.toml`), profile overlay (`dev`, `prod`, `lowmem`), environment variable overrides | — | Fase 0 |
 | `transport` | `gemini-bridge-transport` | HTTP client with TLS/JA3 fingerprint impersonation (Chrome/Firefox), proxy support (HTTP/SOCKS5), retry policy | `config` | Fase 0 |
 | `identity` | `gemini-bridge-identity` | Session bootstrap (`/app`), extraction of `bl`, `SNlM0e`, `f.sid`, automatic `__Secure-1PSIDTS` rotation, cookie storage (0600 mode, optional at-rest encryption via `BRIDGE_SECRET`) | `transport`, `config` | Fase 0 |
-| `gemini-adapter` | `gemini-bridge-adapter-gemini` | Upstream wire protocol: `f.req` positional serialization, `StreamGenerate` client, newline-framed response parsing, prefix-diff engine, externalized `schema/gemini-web.toml` index map | `identity`, `transport`, `config` | Fase 0 |
+| `gemini-adapter` | `gemini-bridge-adapter-gemini` | Upstream wire protocol: `f.req` positional serialization, `StreamGenerate` client, newline-framed response parsing, prefix-diff engine, externalized `schema/gemini-web.toml` index map | `llm-service`, `identity`, `transport`, `config` | Fase 0 |
 | `llm-service` | `gemini-bridge-llm-service` | Neutral LLM traits, streaming/non-streaming abstraction, provider-agnostic request/response data structures | `plugin-context` | Fase 0 |
 | `openai-compat` | `gemini-bridge-openai-compat` | OpenAI REST API schema mapping (`/v1/chat/completions`, `/v1/models`), request normalization to immutable context objects | `llm-service` | Fase 0 |
 | `http-server` | `gemini-bridge-http-server` | Axum 0.8 / Hyper 1.x server, routing, SSE streaming pipelines, CORS, bearer authentication | `openai-compat`, `config` | Fase 0 |
@@ -83,6 +83,7 @@ flowchart LR
   end
 
   plugin_context --> llm_service
+  llm_service --> gemini_adapter
   config --> transport
   config --> identity
   transport --> identity

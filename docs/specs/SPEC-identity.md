@@ -20,6 +20,7 @@ This crate does not automate Google login or depend on Camofox at runtime. Durin
 ## 2. Public API & Interfaces
 
 ```rust
+use http::HeaderMap;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 
@@ -58,7 +59,7 @@ pub trait IdentityService: Send + Sync {
     async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError>;
     async fn refresh_1psidts(&self) -> Result<(), IdentityError>;
     async fn snapshot(&self) -> SessionSnapshot;
-    fn apply_auth_headers(&self, headers: &mut http::HeaderMap) -> Result<(), IdentityError>;
+    fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError>;
     async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError>;
 }
 ```
@@ -77,18 +78,30 @@ pub trait IdentityService: Send + Sync {
 
 ---
 
-## 4. Testing Strategy
+## 4. Acceptance Criteria
+
+1. Importing a cookie header containing the required Gemini session cookies validates it with an authenticated `/app` bootstrap, persists it with owner-only permissions, and never returns or logs the raw values.
+2. A representative sanitized `/app` response yields the active protocol's required bootstrap fields and transitions the session to `Valid`; missing or structurally changed fields return `MissingBootstrapField` and leave readiness degraded.
+3. `apply_auth_headers` derives the Gemini cookie and `SAPISIDHASH` headers inside the identity boundary without exposing credential fields to callers.
+4. Encrypted credential storage round-trips with the correct `BRIDGE_SECRET` and fails closed with a missing or incorrect secret; plaintext storage remains owner-readable only.
+5. Rotation is single-flight and bounded; success updates cookie age/state, while failure transitions to `NeedsReauth` without retry loops or disrupting an already active stream.
+6. Redirects to the upstream `sorry/index` path transition to `IpFlagged` and are not retried automatically.
+
+---
+
+## 5. Testing Strategy
 
 - Parser unit tests against sanitized `/app` fixtures for valid, missing, changed, and malformed bootstrap fields.
 - Cookie-file permission tests and optional encryption round-trip/wrong-key tests in temporary directories.
 - Mock transport tests for expired session, rotation success/failure, `sorry/index` redirect, and concurrent refresh single-flight.
+- Header-generation tests assert required headers are present while captured diagnostics contain no cookie, hash, or token values.
 - CLI tests for actionable `auth login` and `doctor` results without logging imported values.
 - Live session smoke is opt-in and uses operator-provided local credentials only; it is not a deterministic CI test.
 
 ---
 
-## 5. Boundaries
+## 6. Boundaries
 
-- **Always:** Keep credentials local, redact all secret representations, set restrictive file permissions, expose explicit session states, bound refresh attempts.
+- **Always:** Keep credentials local, redact all secret representations, set restrictive file permissions, expose explicit session states, and bound refresh attempts.
 - **Ask First:** Changing credential format/encryption behavior, accepting credentials through a new public route, or adding browser automation/runtime dependencies.
 - **Never:** Commit cookies/tokens, log cookie/header values, run unbounded refresh loops, or claim a valid session without a successful upstream check.

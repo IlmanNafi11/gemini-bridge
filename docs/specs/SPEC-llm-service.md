@@ -11,7 +11,7 @@
 
 ## 1. Objective & Responsibility
 
-Provide provider-neutral request, response, stream event, error, and adapter contracts for chat and media-capable LLM providers. `openai-compat` maps external requests into this contract; provider adapters implement it. The module must not contain Gemini field positions, cookies, URL paths, OpenAI HTTP details, or storage behavior.
+Provide provider-neutral request, response, stream event, error, adapter, and routing contracts for chat and media-capable LLM providers. `openai-compat` maps external requests into this contract; provider adapters implement it; the composition root registers the selected router/adapter through `plugin-context`. The module must not contain Gemini field positions, cookies, URL paths, OpenAI HTTP details, or storage behavior.
 
 ---
 
@@ -34,6 +34,26 @@ pub struct LlmRequest {
     pub tools: Arc<[ToolDefinition]>,
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResult {
+    pub call_id: String,
+    pub content: String,
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role { System, User, Assistant, Tool }
@@ -58,6 +78,23 @@ pub struct ModelSelector {
     pub model: String,
     pub thinking_level: Option<u8>,
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderMetadata {
+    pub raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionSummary {
+    pub finish_reason: String,
+    pub usage: Option<Usage>,
+}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LlmEvent {
@@ -66,6 +103,13 @@ pub enum LlmEvent {
     Metadata(ProviderMetadata),
     Completed(CompletionSummary),
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completion {
+    pub text: String,
+    pub finish_reason: String,
+    pub usage: Option<Usage>,
+}
+
 
 #[derive(Debug, Error)]
 pub enum LlmError {
@@ -100,24 +144,36 @@ pub trait LlmRouter: Send + Sync {
 ## 3. Behavior & Invariants
 
 1. Normalized requests are immutable after construction and shared by `Arc` without clone-heavy transformation.
-2. Streaming uses neutral semantic events, not SSE strings or Gemini response frames.
-3. Provider errors map into the stable `LlmError` taxonomy; HTTP code mapping remains in `openai-compat`/server boundary.
+2. Streaming uses neutral semantic events, not SSE strings or provider response frames, and emits one terminal `Completed` event on successful completion.
+3. Provider errors map into the stable `LlmError` taxonomy; HTTP code mapping remains in the `openai-compat`/server boundary.
 4. Metadata accepts optional provider extensions while core message/result fields remain provider-neutral.
 5. Adding another adapter must not require changing the `LlmRequest`/`LlmEvent` core for provider-specific details.
+6. Dependency direction is `plugin-context` → `llm-service` contract registration and provider adapter → `llm-service`; `llm-service` never imports a provider adapter, `openai-compat`, or the HTTP server.
 
 ---
 
-## 4. Testing Strategy
+## 4. Acceptance Criteria
 
-- Contract tests with a mock adapter for non-stream and stream event ordering.
-- Request immutability and model-routing tests.
-- Error taxonomy tests verifying provider errors can map without leaking provider types.
+1. One immutable `Arc<LlmRequest>` can be passed to non-streaming and streaming mock adapters without provider-specific conversion or mutation.
+2. A mock adapter returns a full `Completion` and an ordered stream of neutral text/tool/metadata/completion events through the same public contract used by production adapters.
+3. `LlmRouter` selects an adapter from `ModelSelector` and returns a stable provider-neutral error for an unknown or unavailable provider.
+4. Authentication, rate-limit, unavailability, unsupported-capability, and protocol failures can be represented without importing provider or HTTP error types.
+5. A second adapter can implement and register the contract without modifications to request/event core types or dependencies from `llm-service` back to either adapter.
+
+---
+
+## 5. Testing Strategy
+
+- Contract tests with a mock adapter for non-stream completion and stream event ordering/terminal behavior.
+- Request immutability and model-routing tests, including unknown providers.
+- Error taxonomy tests verifying provider failures map without leaking provider types.
+- Dependency-boundary review verifies the crate contains no Gemini, Axum/OpenAI HTTP, credential, or storage imports.
 - Fase 3 multi-adapter test proves the same request path can route to a second adapter.
 
 ---
 
-## 5. Boundaries
+## 6. Boundaries
 
-- **Always:** Keep public data structures provider-neutral and request objects immutable.
-- **Ask First:** Adding a core field needed by only one provider or changing stable error variants.
-- **Never:** Import Gemini adapter, Axum/OpenAI HTTP models, credential, or storage crates.
+- **Always:** Keep public data structures provider-neutral, keep request objects immutable, and expose provider selection through `LlmRouter`.
+- **Ask First:** Adding a core field needed by only one provider or changing stable error variants/events.
+- **Never:** Import Gemini adapter, Axum/OpenAI HTTP models, credential, or storage crates, or make this crate depend on any concrete provider.
