@@ -3,7 +3,7 @@
 **Module ID:** `tool-calling`  
 **Crate:** `gemini-bridge-tool-calling` (`crates/tool-calling`)  
 **Phase:** Fase 2  
-**Depends On:** `openai-compat` (declared crate dependency; consumes canonical `llm-service` types)
+**Depends On:** `openai-compat`, `llm-service`
 **Parent Spec:** `SPEC.md` §2.1; PRD §2.2 US-5, §1.3 KPI 5, §3.2 E1 Golden Suite
 **Status:** Approved Draft — enriched for P.7
 

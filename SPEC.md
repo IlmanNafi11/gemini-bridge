@@ -46,10 +46,10 @@ Per `agent-skills:spec-driven-development` preparation, the system is decomposed
 | `health-admin` | `gemini-bridge-health-admin` | `/healthz`, `/readyz`, `/admin/status`, guided `/admin/reauth`, in-memory reload, 405 build label auto-recovery | `http-server`, `identity` | Fase 1 |
 | `middleware` | `gemini-bridge-middleware` | Waterfall event middleware: rate limiting, log secret redaction, audit logging, request tracing | `plugin-context` | Fase 1 |
 | `conversation-store` | `gemini-bridge-conversation-store` | SQLite metadata persistence (`rusqlite`), upstream IDs (`conversationId`, `responseId`, `candidateId`), conversation branching and regeneration | `plugin-context`, `config` | Fase 2 |
-| `tool-calling` | `gemini-bridge-tool-calling` | OpenAI `tools[]` schema injection into prompt, structured JSON output parser, malformed call validator, tool execution feedback loop | `openai-compat` | Fase 2 |
+| `tool-calling` | `gemini-bridge-tool-calling` | OpenAI `tools[]` schema injection into prompt, structured JSON output parser, malformed call validator, tool execution feedback loop | `openai-compat`, `llm-service` | Fase 2 |
 | `gallery` | `gemini-bridge-gallery` | `/gallery` endpoint (JSON) + embedded static HTML UI (`include_str!`), thumbnail generation, media filter/deletion | `media-store`, `http-server` | Fase 2 |
 | `code-exec-surface` | `gemini-bridge-code-exec` | Extraction of `code_execution` (stdout/stderr) and grounding citations into non-intrusive `gemini_metadata` response extension | `gemini-adapter` | Fase 3 |
-| `video-adapter` | `gemini-bridge-adapter-video` | Experimental video generation adapter (off-by-default, explicit 501 fallback) | `gemini-adapter` | Fase 3 |
+| `video-adapter` | `gemini-bridge-adapter-video` | Experimental video generation adapter (off-by-default, explicit 501 fallback) | `gemini-adapter`, `media-store` | Fase 3 |
 
 ### 2.2 Dependency Direction & Build Order
 
@@ -106,10 +106,12 @@ flowchart LR
   plugin_context --> conversation_store
   config --> conversation_store
   openai_compat --> tool_calling
+  llm_service --> tool_calling
   media_store --> gallery
   http_server --> gallery
   gemini_adapter --> code_exec_surface
   gemini_adapter --> video_adapter
+  media_store --> video_adapter
 ```
 
 The graph shows the direct dependencies declared in the capability map; runtime composition does not add crate-dependency edges.

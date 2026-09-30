@@ -3,7 +3,7 @@
 **Module ID:** `video-adapter`  
 **Crate:** `gemini-bridge-adapter-video` (`crates/video-adapter`)  
 **Phase:** Fase 3 (Experimental)  
-**Depends On:** `gemini-adapter` (declared crate dependency). Media caching and feature enablement are runtime composition with `media-store` and `config`; per `SPEC.md` §2.2 these do not add declared crate-dependency edges.
+**Depends On:** `gemini-adapter` (generation and capability detection), `media-store` (content-addressed caching of supported results). Feature enablement is read from `config` at runtime composition.
 **Parent Spec:** `SPEC.md` §2.1; PRD §2.2 US-9, §4.9
 **Status:** Approved Draft — enriched for P.7
 
@@ -41,11 +41,11 @@ use serde::{Deserialize, Serialize};
 /// Request body for `POST /v1/videos/generations`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoGenerationRequest {
-    /// Text description of the video to generate.
+    /// Text description of the video to generate (required, non-empty after trimming).
     pub prompt: String,
-    /// Optional requested duration in seconds. Upstream support is capability-dependent.
+    /// Optional requested duration in seconds (must be 1..=60 if provided).
     pub duration_seconds: Option<u32>,
-    /// Output format: "url" (default) or "b64_json".
+    /// Output format: "url" (default) or "b64_json". Other values return HTTP 400.
     pub response_format: Option<String>,
 }
 
@@ -147,20 +147,25 @@ When video generation is disabled, the generation endpoint remains registered an
    - Missing capability is not a server fault; it must never become generic HTTP 500.
    - Error JSON is actionable and distinguishes `disabled` from `not_implemented`.
 
-3. **Supported Generation Response & Media Caching:**
+3. **Request Validation:**
+   - Empty `prompt` (after whitespace trimming) → HTTP 400 / `VideoError::Validation`.
+   - `duration_seconds` outside 1..=60 → HTTP 400 / `VideoError::Validation`.
+   - `response_format` other than `"url"` or `"b64_json"` → HTTP 400 / `VideoError::Validation`.
+   - Validation failures are deterministic and do not forward the request upstream.
+4. **Supported Generation Response & Media Caching:**
    - When enabled and supported, extract the upstream result, retrieve the video bytes, and cache them through `MediaStore::put` with MIME type `video/mp4` (or `video/webm`).
    - `response_format = "url"` returns only a stable bridge URL (`/v1/videos/{id}`).
    - `response_format = "b64_json"` returns base64-encoded cached bytes.
    - Exactly one of `url` or `b64_json` is populated for each result.
 
-4. **Media Retrieval:**
+5. **Media Retrieval:**
    - `GET /v1/videos/{id}` retrieves content bytes from `MediaStore::get` by opaque ID and returns the stored video MIME type.
    - Unknown IDs map to 404 through the shared API error contract.
 
-5. **No Audio/TTS Expansion:**
+6. **No Audio/TTS Expansion:**
    - This adapter covers video only. Audio generation, TTS, transcription, soundtracks, and audio/video combined capabilities are excluded and are not activated by the video feature flag.
 
-6. **Upstream Boundary:**
+7. **Upstream Boundary:**
    - Provider-specific framing and capability detection occur behind `gemini-adapter`; the video module consumes normalized adapter results and never builds `f.req` itself.
 
 ---
@@ -173,7 +178,7 @@ When video generation is disabled, the generation endpoint remains registered an
 |---|---|
 | Video adapter registered as experimental plugin, off-by-default | `VideoConfig.enabled` defaults to false; invariant 1 |
 | If upstream lacks support, return clear 501 not 500 | `VideoError::NotImplemented`; explicit HTTP mapping; invariant 2 |
-| If supported, return URL/base64 using same schema as image | `VideoGenerationResponse`/`VideoResult` mirrors image response; invariant 3 |
+| If supported, return URL/base64 using same schema as image | `VideoGenerationResponse`/`VideoResult` mirrors image response; invariant 4 |
 
 ---
 
@@ -215,4 +220,4 @@ When video generation is disabled, the generation endpoint remains registered an
 
 ## 9. Audio/TTS Scope Confirmation
 
-This module specification is limited to video generation only. The PRD explicitly defers audio/TTS beyond v2.0, and no audio-related routes, models, metadata fields, processing paths, or configuration flags are introduced by this module.
+This module specification is limited to video generation only. In accordance with PRD §2.3 and SPEC.md §10.8, audio generation, speech, and TTS capabilities are explicitly excluded from this repository's roadmap. No audio routes, parameters, data models, or feature flags are introduced.

@@ -108,6 +108,8 @@ pub struct Completion {
     pub text: String,
     pub finish_reason: String,
     pub usage: Option<Usage>,
+    /// Opaque optional provider extension, decoded only by provider-specific surface modules.
+    pub metadata: Option<ProviderMetadata>,
 }
 
 
