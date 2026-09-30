@@ -31,7 +31,7 @@
   - Files: `docs/specs/SPEC-openai-compat.md`, `docs/specs/SPEC-http-server.md`, `docs/specs/SPEC-middleware.md`
   - Depends on: P.3
 
-- [ ] **P.5: Specify file and image path** (`media-store`, `upload`, `image-gen`)
+- [x] **P.5: Specify file and image path** (`media-store`, `upload`, `image-gen`)
   - Acceptance: Specs define content addressing, upload/reference security, image extraction/cache/response contract and test strategy.
   - Verify: Trace US-2 and US-3 acceptance criteria to all three specs.
   - Files: `docs/specs/SPEC-media-store.md`, `docs/specs/SPEC-upload.md`, `docs/specs/SPEC-image-gen.md`
