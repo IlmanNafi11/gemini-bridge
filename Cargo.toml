@@ -1,9 +1,26 @@
+[package]
+name = "gemini-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gemini-bridge"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+tokio = { workspace = true }
+gemini-bridge-config = { path = "crates/config" }
+gemini-bridge-identity = { path = "crates/identity" }
+
 [workspace]
 resolver = "2"
 members = [
     "crates/plugin-context",
     "crates/config",
     "crates/transport",
+    "crates/identity",
 ]
 
 [workspace.package]
@@ -22,3 +39,8 @@ http = "1"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json"] }
 wiremock = "0.6"
+clap = { version = "4", features = ["derive", "env"] }
+aes-gcm = "0.10"
+regex = "1"
+sha2 = "0.10"
+sha1 = "0.10"

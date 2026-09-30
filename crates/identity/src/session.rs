@@ -1,0 +1,378 @@
+use async_trait::async_trait;
+use http::HeaderMap;
+use parking_lot::Mutex;
+use reqwest::Method;
+use url::Url;
+
+use gemini_bridge_config::{BridgeConfig, StorageConfig};
+use gemini_bridge_transport::{Idempotency, ReqwestTransport, TransportRequest, TransportService};
+
+use crate::error::IdentityError;
+use crate::model::{SessionBootstrap, SessionCredentials, SessionSnapshot, SessionStatus};
+use crate::parser;
+use crate::storage;
+
+/// The public identity service trait.
+#[async_trait]
+pub trait IdentityService: Send + Sync {
+    /// Bootstrap the Gemini session by hitting `/app` and extracting tokens.
+    async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError>;
+    /// Attempt to refresh `__Secure-1PSIDTS` (Fase 1; no-op in Fase 0).
+    async fn refresh_1psidts(&self) -> Result<(), IdentityError>;
+    /// Return current session snapshot (cheap, non-blocking).
+    async fn snapshot(&self) -> SessionSnapshot;
+    /// Import raw cookie header string, parse, validate and persist credentials.
+    async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError>;
+}
+
+/// Inner mutable state of the identity service.
+struct IdentityState {
+    credentials: Option<SessionCredentials>,
+    last_bootstrap: Option<SessionBootstrap>,
+    status: SessionStatus,
+}
+
+/// Default implementation of [`IdentityService`] backed by the local
+/// filesystem cookie store and the shared transport layer.
+pub struct DefaultIdentityService {
+    transport: ReqwestTransport,
+    storage_cfg: StorageConfig,
+    base_url: Option<String>,
+    state: Mutex<IdentityState>,
+}
+
+impl DefaultIdentityService {
+    /// Construct from a [`BridgeConfig`].
+    ///
+    /// Credentials are loaded from disk on construction; if none exist the
+    /// service starts in `Unconfigured` state.
+    pub fn new(config: &BridgeConfig) -> Result<Self, IdentityError> {
+        Self::with_base_url(config, None)
+    }
+
+    /// Construct with an optional custom upstream base URL (useful for integration tests).
+    pub fn with_base_url(
+        config: &BridgeConfig,
+        base_url: Option<String>,
+    ) -> Result<Self, IdentityError> {
+        let transport =
+            ReqwestTransport::new(&config.transport).map_err(|_| IdentityError::Transport)?;
+        let storage_cfg = config.storage.clone();
+
+        // Attempt to load persisted credentials.
+        let credentials = load_credentials(&storage_cfg)?;
+
+        let status = if credentials.is_some() {
+            SessionStatus::Stale
+        } else {
+            SessionStatus::Unconfigured
+        };
+
+        Ok(Self {
+            transport,
+            storage_cfg,
+            base_url,
+            state: Mutex::new(IdentityState {
+                credentials,
+                last_bootstrap: None,
+                status,
+            }),
+        })
+    }
+}
+
+#[async_trait]
+impl IdentityService for DefaultIdentityService {
+    async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError> {
+        let (cookie_header, sapisid) = {
+            let st = self.state.lock();
+            let creds = st
+                .credentials
+                .as_ref()
+                .ok_or(IdentityError::MissingCredentials)?;
+            let cookie_header = format!(
+                "__Secure-1PSID={}; __Secure-1PSIDTS={}; SAPISID={}",
+                creds.psid, creds.psidts, creds.sapisid
+            );
+            let sapisid = creds.sapisid.clone();
+            (cookie_header, sapisid)
+        };
+
+        let auth = parser::build_sapisidhash(&sapisid);
+        let base = self
+            .base_url
+            .as_deref()
+            .unwrap_or("https://gemini.google.com");
+        let url = Url::parse(&format!("{base}/app")).map_err(|_| IdentityError::Transport)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            cookie_header
+                .parse()
+                .map_err(|_| IdentityError::Transport)?,
+        );
+        headers.insert(
+            http::header::AUTHORIZATION,
+            auth.parse().map_err(|_| IdentityError::Transport)?,
+        );
+        headers.insert(
+            http::header::USER_AGENT,
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                .parse()
+                .map_err(|_| IdentityError::Transport)?,
+        );
+
+        let req = TransportRequest {
+            method: Method::GET,
+            url,
+            headers,
+            body: None,
+            idempotency: Idempotency::SafeToRetry,
+        };
+
+        let resp = self
+            .transport
+            .execute(req)
+            .await
+            .map_err(|_| IdentityError::Transport)?;
+
+        // Detect IP-flagging redirect to sorry page.
+        if resp.status.as_u16() == 302 || resp.status.as_u16() == 301 {
+            let loc = resp
+                .headers
+                .get(http::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if loc.contains("sorry") {
+                let mut st = self.state.lock();
+                st.status = SessionStatus::IpFlagged;
+                return Err(IdentityError::IpFlagged);
+            }
+        }
+
+        if !resp.status.is_success() {
+            let mut st = self.state.lock();
+            st.status = SessionStatus::NeedsReauth;
+            return Err(IdentityError::NeedsReauth);
+        }
+
+        let html = String::from_utf8_lossy(&resp.body);
+
+        let bl = parser::extract_bl(&html).ok_or(IdentityError::MissingBootstrapField("bl"))?;
+        let snlm0e =
+            parser::extract_snlm0e(&html).ok_or(IdentityError::MissingBootstrapField("SNlM0e"))?;
+        let fsid =
+            parser::extract_fsid(&html).ok_or(IdentityError::MissingBootstrapField("f.sid"))?;
+
+        let bootstrap = SessionBootstrap {
+            bl: bl.clone(),
+            snlm0e: snlm0e.clone(),
+            fsid: fsid.clone(),
+        };
+
+        {
+            let mut st = self.state.lock();
+            st.status = SessionStatus::Valid;
+            st.last_bootstrap = Some(SessionBootstrap { bl, snlm0e, fsid });
+        }
+
+        Ok(bootstrap)
+    }
+
+    async fn refresh_1psidts(&self) -> Result<(), IdentityError> {
+        // Fase 0 stub – Fase 1 will implement rotation.
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> SessionSnapshot {
+        let st = self.state.lock();
+        let build_label = st.last_bootstrap.as_ref().map(|b| b.bl.clone());
+        let cookie_age = st.credentials.as_ref().and_then(|c| {
+            // Parse the imported_at timestamp and compute age via std time.
+            // Format is RFC3339; use a simple duration calculation.
+            parse_age_from_rfc3339(&c.imported_at)
+        });
+        SessionSnapshot {
+            status: st.status,
+            build_label,
+            cookie_age,
+            checked_at: std::time::SystemTime::now(),
+        }
+    }
+
+    async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError> {
+        let creds =
+            parse_cookie_header(raw_cookie_header).ok_or(IdentityError::MissingCredentials)?;
+        storage::write_cookies(
+            &self.storage_cfg.data_dir,
+            &serde_json::to_string(&creds).map_err(|_| IdentityError::Storage)?,
+        )?;
+        let mut st = self.state.lock();
+        st.credentials = Some(creds);
+        st.status = SessionStatus::Stale;
+        Ok(())
+    }
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Parse the required cookies from a full `Cookie:` header string.
+///
+/// Accepted field names: `__Secure-1PSID`, `__Secure-1PSIDTS`, `SAPISID`.
+fn parse_cookie_header(raw: &str) -> Option<SessionCredentials> {
+    let mut psid = None;
+    let mut psidts = None;
+    let mut sapisid = None;
+
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once('=') {
+            let k = k.trim();
+            let v = v.trim().to_string();
+            match k {
+                "__Secure-1PSID" => psid = Some(v),
+                "__Secure-1PSIDTS" => psidts = Some(v),
+                "SAPISID" => sapisid = Some(v),
+                _ => {}
+            }
+        }
+    }
+
+    Some(SessionCredentials {
+        psid: psid?,
+        psidts: psidts?,
+        sapisid: sapisid?,
+        imported_at: rfc3339_now(),
+    })
+}
+
+/// Load credentials from disk. Silently returns `None` on any error to allow
+/// graceful startup without credentials.
+fn load_credentials(cfg: &StorageConfig) -> Result<Option<SessionCredentials>, IdentityError> {
+    match storage::read_cookies(&cfg.data_dir)? {
+        None => Ok(None),
+        Some(json) => {
+            let creds: SessionCredentials =
+                serde_json::from_str(&json).map_err(|_| IdentityError::Storage)?;
+            Ok(Some(creds))
+        }
+    }
+}
+
+/// Produce a minimal RFC3339 timestamp using only stdlib.
+fn rfc3339_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Format as ISO-8601 UTC: 1970-01-01T00:00:00Z
+    let s = secs;
+    let (y, mo, d, h, mi, sec) = unix_to_parts(s);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, sec)
+}
+
+/// Parse age from a stored RFC3339 string (the simple format we produce).
+fn parse_age_from_rfc3339(s: &str) -> Option<std::time::Duration> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Expect format: YYYY-MM-DDTHH:MM:SSZ
+    let s = s.trim_end_matches('Z');
+    let parts: Vec<&str> = s.splitn(2, 'T').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let date: Vec<u32> = parts[0].split('-').filter_map(|x| x.parse().ok()).collect();
+    let time: Vec<u32> = parts[1].split(':').filter_map(|x| x.parse().ok()).collect();
+    if date.len() < 3 || time.len() < 3 {
+        return None;
+    }
+    let then_secs = parts_to_unix(
+        date[0] as u64,
+        date[1] as u64,
+        date[2] as u64,
+        time[0] as u64,
+        time[1] as u64,
+        time[2] as u64,
+    );
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now_secs
+        .checked_sub(then_secs)
+        .map(std::time::Duration::from_secs)
+}
+
+/// Convert unix epoch seconds to (year, month, day, hour, min, sec).
+fn unix_to_parts(mut s: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let sec = s % 60;
+    s /= 60;
+    let min = s % 60;
+    s /= 60;
+    let hour = s % 24;
+    s /= 24;
+    // Days since 1970-01-01
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if s < days_in_year {
+            break;
+        }
+        s -= days_in_year;
+        year += 1;
+    }
+    let months = [
+        31u64,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for m in &months {
+        if s < *m {
+            break;
+        }
+        s -= m;
+        month += 1;
+    }
+    (year, month, s + 1, hour, min, sec)
+}
+
+fn parts_to_unix(y: u64, mo: u64, d: u64, h: u64, mi: u64, s: u64) -> u64 {
+    let mut days = 0u64;
+    for yr in 1970..y {
+        days += if is_leap(yr) { 366 } else { 365 };
+    }
+    let months = [
+        31u64,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for days_in_month in months.iter().take((mo - 1) as usize) {
+        days += days_in_month;
+    }
+    days += d - 1;
+    days * 86400 + h * 3600 + mi * 60 + s
+}
+
+fn is_leap(y: u64) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
