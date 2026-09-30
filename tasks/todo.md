@@ -19,7 +19,7 @@
   - Files: `docs/specs/SPEC-plugin-context.md`, `docs/specs/SPEC-config.md`, `docs/specs/SPEC-transport.md`
   - Depends on: P.1
 
-- [ ] **P.3: Specify upstream chat foundation** (`identity`, `gemini-adapter`, `llm-service`)
+- [x] **P.3: Specify upstream chat foundation** (`identity`, `gemini-adapter`, `llm-service`)
   - Acceptance: Specs define session/security lifecycle, adapter wire boundaries and parser behavior, and provider-neutral service contract without circular dependencies.
   - Verify: Review contracts against PRD §3.1 and SPEC dependency edges.
   - Files: `docs/specs/SPEC-identity.md`, `docs/specs/SPEC-gemini-adapter.md`, `docs/specs/SPEC-llm-service.md`
