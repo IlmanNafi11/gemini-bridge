@@ -26,7 +26,7 @@ The core architecture follows the **"everything is a plugin"** philosophy (inspi
 
 ## 2. Capability Map & Module Architecture
 
-Per `agent-skills:spec-driven-development` Phase 0, the system is decomposed into 18 modular capabilities with explicit dependency boundaries. Each module corresponds to a dedicated crate in the Cargo workspace and has its own child specification document (`docs/specs/SPEC-<module-id>.md`).
+Per `agent-skills:spec-driven-development` preparation, the system is decomposed into 18 modular capabilities with explicit dependency boundaries. Each module corresponds to a dedicated crate in the Cargo workspace and has its own child specification document (`docs/specs/SPEC-<module-id>.md`). Module IDs identify crate directories; the Cargo package names are listed separately in the table and may differ (for example, `gemini-adapter` → `gemini-bridge-adapter-gemini`).
 
 ### 2.1 Capability Map Table
 
@@ -53,31 +53,65 @@ Per `agent-skills:spec-driven-development` Phase 0, the system is decomposed int
 
 ### 2.2 Dependency Direction & Build Order
 
+```mermaid
+flowchart LR
+  subgraph Fase0["Fase 0"]
+    plugin_context["plugin-context"]
+    config
+    transport
+    identity
+    gemini_adapter["gemini-adapter"]
+    llm_service["llm-service"]
+    openai_compat["openai-compat"]
+    http_server["http-server"]
+  end
+  subgraph Fase1["Fase 1"]
+    media_store["media-store"]
+    upload
+    image_gen["image-gen"]
+    health_admin["health-admin"]
+    middleware
+  end
+  subgraph Fase2["Fase 2"]
+    conversation_store["conversation-store"]
+    tool_calling["tool-calling"]
+    gallery
+  end
+  subgraph Fase3["Fase 3"]
+    code_exec_surface["code-exec-surface"]
+    video_adapter["video-adapter"]
+  end
+
+  plugin_context --> llm_service
+  config --> transport
+  config --> identity
+  transport --> identity
+  config --> gemini_adapter
+  transport --> gemini_adapter
+  identity --> gemini_adapter
+  llm_service --> openai_compat
+  openai_compat --> http_server
+  config --> http_server
+  config --> media_store
+  identity --> upload
+  transport --> upload
+  config --> upload
+  gemini_adapter --> image_gen
+  upload --> image_gen
+  media_store --> image_gen
+  http_server --> health_admin
+  identity --> health_admin
+  plugin_context --> middleware
+  plugin_context --> conversation_store
+  config --> conversation_store
+  openai_compat --> tool_calling
+  media_store --> gallery
+  http_server --> gallery
+  gemini_adapter --> code_exec_surface
+  gemini_adapter --> video_adapter
 ```
-Layer 0: [plugin-context]  [config]
-              │               │
-Layer 1:      ▼               ├──────────────────────┐
-          [transport]         ▼                      ▼
-              │          [media-store]         [llm-service]
-Layer 2:      ▼               │                      │
-          [identity]          │                      │
-              │               │                      │
-Layer 3:      ▼               │                      ▼
-       [gemini-adapter]       │               [openai-compat]
-              │               │                      │
-Layer 4:      ├───────────────┼──────────────┐       │
-              ▼               ▼              ▼       ▼
-          [upload]       [gallery]     [http-server] [middleware]
-              │               │              │
-Layer 5:      ▼               │              ▼
-         [image-gen] ◄────────┘      [health-admin] [conversation-store]
-              │                                      │
-Layer 6:      ▼                                      ▼
-     [code-exec-surface]                       [tool-calling]
-              │
-Layer 7:      ▼
-       [video-adapter]
-```
+
+The graph shows the direct dependencies declared in the capability map; runtime composition does not add crate-dependency edges.
 
 ---
 
@@ -94,7 +128,7 @@ Layer 7:      ▼
 | **Media Storage** | Local filesystem (content-addressed SHA-256) | Zero DB bloat, easy backup, minimal memory usage |
 | **Configuration** | `figment` or `config` with TOML & environment variable overlay | Layered profiles (`dev`, `prod`, `lowmem`) and 12-factor compliance |
 | **Observability** | `tracing`, `tracing-subscriber` (JSON formatter) | Structured logging with `request_id`, secret redaction waterfall |
-| **Plugin Architecture** | In-repo static registry, trait objects, manual registration (v1) | Zero `unsafe` dynamic loading in initial phases; deterministic boot |
+| **Plugin Architecture** | In-repo static registry, trait objects, manual registration for the initial release | Deterministic boot; the later reload mechanism is not yet selected (see §10) |
 | **Testing** | `cargo test`, `cargo nextest`, `wiremock`, `insta` (snapshot testing) | Deterministic mocks, fast runner, regression-resistant wire parser tests |
 | **Performance Benchmarking** | `oha`, `wrk` | Verification of p50 ≤ 15ms overhead latency and memory bounds |
 
@@ -336,11 +370,20 @@ For explicit traceability, the following critical decisions were confirmed durin
 1. **Capability Scope:** Approved 18 modules structured across 7 dependency layers.
 2. **License:** MIT License.
 3. **Session Credentials:** Account policy uses project operator's designated Google account (configured locally/externally; never stored in git).
-4. **Plugin Architecture (v1):** Built-in static registry with trait objects (zero `unsafe` dynamic loading in initial release). Dynamic loading deferred to Phase 3.
+4. **Plugin Architecture (initial release):** Built-in static registry with trait objects (zero `unsafe` dynamic loading in the initial release). The required Fase 3 reload mechanism remains undecided; see Open Architecture Decisions below.
 5. **API Key Security:** Configurable via `bridge.toml` (default: optional on `127.0.0.1`, mandatory on non-localhost bindings and `/admin/*` routes).
 6. **Gallery UI:** Embedded lightweight static HTML UI served directly by binary (`include_str!`).
-7. **TLS/JA3 Fingerprinting:** Full JA3 impersonation client included in Phase 0 scope to prevent immediate Google bot classification.
-8. **Media Capabilities:** Video generation included as experimental (Phase 3); Audio/TTS deferred post-v2.0.
-9. **At-Rest Encryption:** Optional AES-GCM encryption for stored session tokens when `BRIDGE_SECRET` environment variable is supplied (fallback to OS-level `0600` file permissions).
+7. **TLS/JA3 Fingerprinting:** Full JA3 impersonation client included in Fase 0 scope; the specific implementation must be validated against Gemini Web before closing Task 0.3.
+8. **Media Capabilities:** Video generation included as experimental (Fase 3); Audio/TTS deferred post-v2.0.
+9. **At-Rest Encryption:** Optional AES-GCM encryption for stored session tokens when `BRIDGE_SECRET` is supplied (fallback to OS-level `0600` file permissions).
 10. **Browser Automation:** Camofox is available in the local development environment for manual cookie extraction/testing, but is NOT a runtime dependency of the deployed binary.
 11. **Default Network Binding:** Configurable via `bridge.toml`, default `127.0.0.1:8090`.
+
+### Open Architecture Decisions
+
+These choices are intentionally unresolved and must be settled in the relevant module specification or implementation task; the alternatives below are not commitments:
+
+- **Fase 3 plugin reload:** Choose between replacing built-in plugin instances in-process and loading dynamic libraries (for example, with `libloading`). Preserve active streams either way. No dynamic-library ABI, `unsafe` policy, or implementation is approved yet.
+- **TLS/JA3 implementation:** Select and validate a client implementation/profile (the stack currently lists `boring` or custom `rustls` configuration as alternatives) against an actual Gemini Web request in Task 0.3.
+- **Configuration crate:** Select `figment` or `config` when specifying the config module.
+- **Credential encryption:** Define key derivation and nonce/storage handling for the optional AES-GCM path when specifying the identity module; `BRIDGE_SECRET` alone does not settle those details.
