@@ -58,6 +58,7 @@ pub trait IdentityService: Send + Sync {
     async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError>;
     async fn refresh_1psidts(&self) -> Result<(), IdentityError>;
     async fn snapshot(&self) -> SessionSnapshot;
+    fn apply_auth_headers(&self, headers: &mut http::HeaderMap) -> Result<(), IdentityError>;
     async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError>;
 }
 ```

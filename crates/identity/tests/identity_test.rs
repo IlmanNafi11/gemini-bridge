@@ -292,3 +292,41 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
     assert_eq!(bootstrap.fsid, "1234567890123456789");
     assert_eq!(service.snapshot().await.status, SessionStatus::Valid);
 }
+
+#[tokio::test]
+async fn apply_auth_headers_sets_expected_headers() {
+    use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
+    use gemini_bridge_identity::{DefaultIdentityService, IdentityService};
+    use http::HeaderMap;
+
+    let dir = tempdir().unwrap();
+    let config = BridgeConfig {
+        server: ServerConfig {
+            bind_addr: "127.0.0.1".to_string(),
+            port: 8090,
+            api_key: None,
+            cors_enabled: false,
+        },
+        storage: StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            media_ttl_days: 30,
+        },
+        transport: TransportConfig {
+            tls_profile: "chrome".to_string(),
+            proxy_url: None,
+            timeout_secs: 5,
+        },
+    };
+    let service = DefaultIdentityService::new(&config).unwrap();
+    let mut headers = HeaderMap::new();
+    assert!(service.apply_auth_headers(&mut headers).is_err());
+
+    service
+        .import_credentials("__Secure-1PSID=psid; __Secure-1PSIDTS=psidts; SAPISID=sapisid")
+        .await
+        .unwrap();
+
+    service.apply_auth_headers(&mut headers).unwrap();
+    assert!(headers.contains_key(http::header::COOKIE));
+    assert!(headers.contains_key(http::header::AUTHORIZATION));
+}

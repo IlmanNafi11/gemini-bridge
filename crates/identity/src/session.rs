@@ -21,6 +21,8 @@ pub trait IdentityService: Send + Sync {
     async fn refresh_1psidts(&self) -> Result<(), IdentityError>;
     /// Return current session snapshot (cheap, non-blocking).
     async fn snapshot(&self) -> SessionSnapshot;
+    /// Apply authenticated Gemini session headers without exposing credential values.
+    fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError>;
     /// Import raw cookie header string, parse, validate and persist credentials.
     async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError>;
 }
@@ -84,21 +86,6 @@ impl DefaultIdentityService {
 #[async_trait]
 impl IdentityService for DefaultIdentityService {
     async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError> {
-        let (cookie_header, sapisid) = {
-            let st = self.state.lock();
-            let creds = st
-                .credentials
-                .as_ref()
-                .ok_or(IdentityError::MissingCredentials)?;
-            let cookie_header = format!(
-                "__Secure-1PSID={}; __Secure-1PSIDTS={}; SAPISID={}",
-                creds.psid, creds.psidts, creds.sapisid
-            );
-            let sapisid = creds.sapisid.clone();
-            (cookie_header, sapisid)
-        };
-
-        let auth = parser::build_sapisidhash(&sapisid);
         let base = self
             .base_url
             .as_deref()
@@ -106,23 +93,7 @@ impl IdentityService for DefaultIdentityService {
         let url = Url::parse(&format!("{base}/app")).map_err(|_| IdentityError::Transport)?;
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::COOKIE,
-            cookie_header
-                .parse()
-                .map_err(|_| IdentityError::Transport)?,
-        );
-        headers.insert(
-            http::header::AUTHORIZATION,
-            auth.parse().map_err(|_| IdentityError::Transport)?,
-        );
-        headers.insert(
-            http::header::USER_AGENT,
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-                .parse()
-                .map_err(|_| IdentityError::Transport)?,
-        );
-
+        self.apply_auth_headers(&mut headers)?;
         let req = TransportRequest {
             method: Method::GET,
             url,
@@ -182,6 +153,42 @@ impl IdentityService for DefaultIdentityService {
 
     async fn refresh_1psidts(&self) -> Result<(), IdentityError> {
         // Fase 0 stub – Fase 1 will implement rotation.
+        Ok(())
+    }
+    fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError> {
+        let (cookie_header, sapisid) = {
+            let st = self.state.lock();
+            let creds = st
+                .credentials
+                .as_ref()
+                .ok_or(IdentityError::MissingCredentials)?;
+            (
+                format!(
+                    "__Secure-1PSID={}; __Secure-1PSIDTS={}; SAPISID={}",
+                    creds.psid, creds.psidts, creds.sapisid
+                ),
+                creds.sapisid.clone(),
+            )
+        };
+
+        headers.insert(
+            http::header::COOKIE,
+            cookie_header
+                .parse()
+                .map_err(|_| IdentityError::Transport)?,
+        );
+        headers.insert(
+            http::header::AUTHORIZATION,
+            parser::build_sapisidhash(&sapisid)
+                .parse()
+                .map_err(|_| IdentityError::Transport)?,
+        );
+        headers.insert(
+            http::header::USER_AGENT,
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                .parse()
+                .map_err(|_| IdentityError::Transport)?,
+        );
         Ok(())
     }
 
