@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
@@ -15,6 +16,7 @@ url = { workspace = true }
 gemini-bridge-config = { path = "../config" }
 gemini-bridge-transport = { path = "../transport" }
 gemini-bridge-identity = { path = "../identity" }
+toml = "0.8"
 gemini-bridge-llm-service = { path = "../llm-service" }
 
 [dev-dependencies]

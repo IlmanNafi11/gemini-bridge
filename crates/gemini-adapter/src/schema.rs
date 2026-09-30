@@ -1,11 +1,33 @@
 //! Typed positional contract for the Gemini Web wire shape.
-//!
-//! Task 0.5 keeps this contract injectable for parser/encoder tests. Loading it
-//! from an external file and validating it at startup belong to Task 0.6.
 
+use serde::Deserialize;
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::GeminiAdapterError;
+
+#[derive(Debug, Error)]
+pub enum SchemaLoadError {
+    #[error("schema TOML could not be parsed: {0}")]
+    ParseError(String),
+    #[error("schema is missing required field: {0}")]
+    MissingField(&'static str),
+    #[error("schema candidate path is invalid: {0}")]
+    InvalidPath(String),
+}
+
+#[derive(Deserialize)]
+struct SchemaDocument {
+    positions: Option<RawPositions>,
+}
+
+#[derive(Deserialize)]
+struct RawPositions {
+    user_message: Option<usize>,
+    conversation_id: Option<usize>,
+    response_id: Option<usize>,
+    candidate_text_path: Option<Vec<String>>,
+}
 
 /// One segment in the path to cumulative candidate text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +63,58 @@ impl Default for GeminiWebSchema {
 }
 
 impl GeminiWebSchema {
+    /// Parse and validate the external Gemini Web positional schema.
+    pub fn from_toml(source: &str) -> Result<Self, SchemaLoadError> {
+        if source.trim().is_empty() {
+            return Err(SchemaLoadError::ParseError("schema is empty".to_owned()));
+        }
+
+        let document: SchemaDocument = toml::from_str(source)
+            .map_err(|error| SchemaLoadError::ParseError(error.to_string()))?;
+        let positions = document
+            .positions
+            .ok_or(SchemaLoadError::MissingField("positions"))?;
+        let user_message = positions
+            .user_message
+            .ok_or(SchemaLoadError::MissingField("positions.user_message"))?;
+        let conversation_id = positions
+            .conversation_id
+            .ok_or(SchemaLoadError::MissingField("positions.conversation_id"))?;
+        let response_id = positions
+            .response_id
+            .ok_or(SchemaLoadError::MissingField("positions.response_id"))?;
+        let raw_path = positions
+            .candidate_text_path
+            .ok_or(SchemaLoadError::MissingField(
+                "positions.candidate_text_path",
+            ))?;
+
+        if [user_message, conversation_id, response_id]
+            .iter()
+            .enumerate()
+            .any(|(offset, index)| {
+                [user_message, conversation_id, response_id][offset + 1..].contains(index)
+            })
+        {
+            return Err(SchemaLoadError::InvalidPath(
+                "request positions must be distinct".to_owned(),
+            ));
+        }
+
+        let candidate_text_path = parse_candidate_path(raw_path)?;
+        Ok(Self {
+            user_message,
+            conversation_id,
+            response_id,
+            candidate_text_path,
+        })
+    }
+
+    /// Load the checked-in schema used by production constructors.
+    pub fn bundled() -> Result<Self, SchemaLoadError> {
+        Self::from_toml(include_str!("../../../schema/gemini-web.toml"))
+    }
+
     /// Construct the positional envelope using only schema-owned indices.
     pub(crate) fn build_request_envelope(
         &self,
@@ -105,4 +179,34 @@ fn set_unique(
     }
     envelope[index] = value;
     Ok(())
+}
+
+fn parse_candidate_path(raw_path: Vec<String>) -> Result<Vec<PathSegment>, SchemaLoadError> {
+    if raw_path.is_empty() || !raw_path.len().is_multiple_of(2) {
+        return Err(SchemaLoadError::InvalidPath(
+            "path must contain non-empty type/value pairs".to_owned(),
+        ));
+    }
+
+    raw_path
+        .chunks_exact(2)
+        .map(|pair| match pair[0].as_str() {
+            "field" if !pair[1].is_empty() => Ok(PathSegment::Field(pair[1].clone())),
+            "field" => Err(SchemaLoadError::InvalidPath(
+                "field name must not be empty".to_owned(),
+            )),
+            "index" => pair[1]
+                .parse::<usize>()
+                .map(PathSegment::Index)
+                .map_err(|_| {
+                    SchemaLoadError::InvalidPath(format!(
+                        "index value {:?} is not a non-negative integer",
+                        pair[1]
+                    ))
+                }),
+            kind => Err(SchemaLoadError::InvalidPath(format!(
+                "unknown path segment type {kind:?}"
+            ))),
+        })
+        .collect()
 }

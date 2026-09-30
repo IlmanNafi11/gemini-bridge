@@ -1,9 +1,11 @@
 //! Gemini Web provider adapter.
 //!
 //! Task 0.5 implements authenticated non-streaming generation. Streaming is
-//! intentionally unsupported until Task 1.1.
+//! intentionally unsupported until Task 1.1. Task 0.6 adds externalized schema
+//! loading and a startup self-check.
 
 pub mod schema;
+pub mod self_check;
 
 use std::pin::Pin;
 use std::sync::Arc;

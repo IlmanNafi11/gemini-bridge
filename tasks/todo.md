@@ -85,7 +85,7 @@
   - Files: `crates/llm-service/src/lib.rs`, `crates/gemini-adapter/Cargo.toml`, `crates/gemini-adapter/src/lib.rs`, `crates/gemini-adapter/src/f_req.rs`, `crates/gemini-adapter/src/parser.rs`
   - Depends on: Tasks 0.1, 0.4
 
-- [ ] **Task 0.6: Add externalized upstream schema and parser self-check**
+- [x] **Task 0.6: Add externalized upstream schema and parser self-check**
   - Acceptance: Positional/schema indices live in `schema/gemini-web.toml`; a representative response passes self-check; unknown/malformed schema moves service to specified degraded/error state rather than panic/500.
   - Verify: Adapter tests cover valid and invalid schema fixtures.
   - Files: `schema/gemini-web.toml`, `crates/gemini-adapter/src/schema.rs`, `crates/gemini-adapter/src/self_check.rs`

@@ -1,0 +1,27 @@
+# Gemini Web wire-protocol positional schema for gemini-bridge.
+#
+# These values define the positions inside the `f.req` JSON envelope and the
+# traversal path that locates candidate text inside the newline-framed response.
+# All indices are 0-based.
+#
+# When updating this file, run the adapter's self-check before shipping:
+#   cargo test -p gemini-bridge-adapter-gemini
+
+[positions]
+# Index of the user message string in the f.req outer array.
+user_message = 0
+# Index of the upstream conversation ID in the f.req outer array (null when new).
+conversation_id = 1
+# Index of the upstream response ID in the f.req outer array (null when new).
+response_id = 2
+
+# Path to cumulative candidate text inside each response frame.
+# Elements are alternating type and value pairs:
+#   "field" followed by the field name, or "index" followed by the 0-based index.
+candidate_text_path = [
+    "field", "candidates",
+    "index", "0",
+    "field", "parts",
+    "index", "0",
+    "field", "text",
+]
