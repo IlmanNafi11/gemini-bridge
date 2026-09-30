@@ -25,7 +25,7 @@
   - Files: `docs/specs/SPEC-identity.md`, `docs/specs/SPEC-gemini-adapter.md`, `docs/specs/SPEC-llm-service.md`
   - Depends on: P.2
 
-- [ ] **P.4: Specify API serving path** (`openai-compat`, `http-server`, `middleware`)
+- [x] **P.4: Specify API serving path** (`openai-compat`, `http-server`, `middleware`)
   - Acceptance: Specs define request/response and error mapping, routes/auth/SSE boundary, middleware order, and request ID/redaction contract.
   - Verify: Trace US-1 and US-8 API criteria to these three module specs.
   - Files: `docs/specs/SPEC-openai-compat.md`, `docs/specs/SPEC-http-server.md`, `docs/specs/SPEC-middleware.md`
