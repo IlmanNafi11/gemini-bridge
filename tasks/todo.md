@@ -111,7 +111,7 @@
   - Files: `crates/gemini-adapter/src/stream.rs`, `crates/gemini-adapter/src/prefix_diff.rs`, `crates/http-server/src/handlers/chat_stream.rs`, `tests/e2e_chat_test.rs`
   - Depends on: Task 0.7
 
-- [ ] **Task 1.2: Implement content-addressed media store**
+- [x] **Task 1.2: Implement content-addressed media store**
   - Acceptance: Content has deterministic SHA-256 identity; duplicate bytes resolve to same stored object; metadata supports retrieval and TTL/purge without removing newer files.
   - Verify: `cargo test -p gemini-bridge-media-store`, including deduplication and expiry boundary tests.
   - Files: `crates/media-store/Cargo.toml`, `crates/media-store/src/lib.rs`, `crates/media-store/src/store.rs`, `crates/media-store/src/cleanup.rs`
