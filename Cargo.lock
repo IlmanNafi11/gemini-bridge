@@ -625,6 +625,7 @@ name = "gemini-bridge-http-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures",
  "gemini-bridge-adapter-gemini",
  "gemini-bridge-config",
  "gemini-bridge-identity",

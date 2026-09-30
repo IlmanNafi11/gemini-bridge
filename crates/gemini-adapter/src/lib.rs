@@ -1,11 +1,13 @@
 //! Gemini Web provider adapter.
 //!
-//! Task 0.5 implements authenticated non-streaming generation. Streaming is
-//! intentionally unsupported until Task 1.1. Task 0.6 adds externalized schema
-//! loading and a startup self-check.
+//! Task 0.5 implements authenticated non-streaming generation. Task 0.6 adds
+//! externalized schema loading and a startup self-check. Task 1.1 adds the
+//! streaming SSE path with a prefix-diff engine.
 
+pub mod prefix_diff;
 pub mod schema;
 pub mod self_check;
+pub mod stream;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -145,10 +147,12 @@ impl DefaultGeminiAdapter {
         })
     }
 
-    async fn execute_non_stream(
+    /// Execute the StreamGenerate upstream request and return the raw response
+    /// body bytes. Both streaming and non-streaming paths share this method.
+    async fn execute_wire_request(
         &self,
         request: &LlmRequest,
-    ) -> Result<Completion, GeminiAdapterError> {
+    ) -> Result<Bytes, GeminiAdapterError> {
         let bootstrap = self
             .identity
             .bootstrap()
@@ -165,7 +169,7 @@ impl DefaultGeminiAdapter {
         let envelope_json = serde_json::to_string(&envelope).map_err(|error| {
             GeminiAdapterError::SchemaMismatch(format!("cannot encode f.req: {error}"))
         })?;
-        let body = url::form_urlencoded::Serializer::new(String::new())
+        let form_body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("f.req", &envelope_json)
             .finish();
 
@@ -196,7 +200,7 @@ impl DefaultGeminiAdapter {
                 method: Method::POST,
                 url,
                 headers,
-                body: Some(Bytes::from(body)),
+                body: Some(Bytes::from(form_body)),
                 idempotency: Idempotency::NeverRetry,
             })
             .await
@@ -224,7 +228,15 @@ impl DefaultGeminiAdapter {
             _ => {}
         }
 
-        let text = parse_non_stream_response(&response.body, &self.schema)?;
+        Ok(response.body)
+    }
+
+    async fn execute_non_stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Completion, GeminiAdapterError> {
+        let body = self.execute_wire_request(request).await?;
+        let text = parse_non_stream_response(&body, &self.schema)?;
         Ok(Completion {
             text,
             finish_reason: "stop".to_owned(),
@@ -244,11 +256,36 @@ impl GeminiAdapter for DefaultGeminiAdapter {
 
     async fn generate_stream(
         &self,
-        _req: NormalizedLlmRequest,
+        req: NormalizedLlmRequest,
     ) -> Result<ChunkStream, GeminiAdapterError> {
-        Err(GeminiAdapterError::Transport(
-            "streaming is not implemented".to_owned(),
-        ))
+        // Reuse the same upstream wire call; the full buffered body is parsed
+        // frame-by-frame through the prefix-diff engine.
+        let response_bytes = self.execute_wire_request(&req).await?;
+        // ChunkStream wraps a StreamChunk type distinct from LlmEvent.
+        // We delegate to the shared parse_stream_body and translate events.
+        use crate::stream::parse_stream_body;
+        use futures::StreamExt;
+        use gemini_bridge_llm_service::LlmEvent;
+        let llm_stream = parse_stream_body(&response_bytes, &self.schema)?;
+        let chunk_stream: ChunkStream = Box::pin(llm_stream.filter_map(|ev| async move {
+            match ev {
+                Ok(LlmEvent::TextDelta(text)) => Some(Ok(StreamChunk {
+                    delta_text: Some(text),
+                    is_finished: false,
+                    finish_reason: None,
+                    metadata: None,
+                })),
+                Ok(LlmEvent::Completed(summary)) => Some(Ok(StreamChunk {
+                    delta_text: None,
+                    is_finished: true,
+                    finish_reason: Some(summary.finish_reason),
+                    metadata: None,
+                })),
+                Ok(_) => None,
+                Err(e) => Some(Err(GeminiAdapterError::Transport(e.to_string()))),
+            }
+        }));
+        Ok(chunk_stream)
     }
 }
 
@@ -264,8 +301,13 @@ impl LlmAdapter for DefaultGeminiAdapter {
             .map_err(map_llm_error)
     }
 
-    async fn stream(&self, _request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::Unsupported("streaming"))
+    async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        use crate::stream::parse_stream_body;
+        let response_bytes = self
+            .execute_wire_request(&request)
+            .await
+            .map_err(map_llm_error)?;
+        parse_stream_body(&response_bytes, &self.schema).map_err(map_llm_error)
     }
 }
 
@@ -333,7 +375,11 @@ pub fn parse_non_stream_response(
     })
 }
 
-fn find_candidate_text(value: &Value, schema: &GeminiWebSchema, latest: &mut Option<String>) {
+pub(crate) fn find_candidate_text(
+    value: &Value,
+    schema: &GeminiWebSchema,
+    latest: &mut Option<String>,
+) {
     if let Ok(text) = schema.extract_candidate_text(value) {
         *latest = Some(text.to_owned());
     }

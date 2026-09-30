@@ -315,3 +315,197 @@ async fn unknown_model_returns_openai_error_shape() {
         "error.type must be a string"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.1: Streaming SSE chat path
+// ---------------------------------------------------------------------------
+
+/// Build a multi-frame Gemini StreamGenerate response body where each frame
+/// contains the *cumulative* text accumulated so far.
+fn gemini_multi_frame_response(frames: &[&str]) -> String {
+    frames
+        .iter()
+        .map(|text| gemini_stream_generate_response(text))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Parse raw SSE text into `(data_lines, has_done)`.
+///
+/// Returns all `data: <json>` payloads (the JSON string, not including `data: `
+/// prefix) and whether `data: [DONE]` appeared.
+fn parse_sse(raw: &str) -> (Vec<String>, bool) {
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut has_done = false;
+    for line in raw.lines() {
+        if let Some(payload) = line.strip_prefix("data: ") {
+            if payload == "[DONE]" {
+                has_done = true;
+            } else {
+                data_lines.push(payload.to_owned());
+            }
+        }
+    }
+    (data_lines, has_done)
+}
+
+#[tokio::test]
+async fn stream_true_returns_sse_chunks_with_done_sentinel() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("^/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gemini_app_response()))
+        .mount(&mock_server)
+        .await;
+
+    // Three cumulative frames: "Hi", "Hi there", "Hi there!"
+    let body = gemini_multi_frame_response(&["Hi", "Hi there", "Hi there!"]);
+    Mock::given(method("POST"))
+        .and(path_regex("^/_/BardChatUi/data"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&mock_server)
+        .await;
+
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    spawn_server(state, srv_config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .header("Accept", "text/event-stream")
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .expect("request should reach server");
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "text/event-stream"
+    );
+
+    let raw = resp.text().await.expect("should be text");
+    let (data_lines, has_done) = parse_sse(&raw);
+
+    // Must have [DONE] terminal sentinel.
+    assert!(has_done, "SSE stream must end with data: [DONE]");
+
+    // Must have at least one chunk.
+    assert!(
+        !data_lines.is_empty(),
+        "must produce at least one data chunk"
+    );
+
+    // Every data payload must be valid JSON shaped as ChatCompletionChunk.
+    for line in &data_lines {
+        let chunk: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("SSE payload not valid JSON: {e}\n  payload: {line}"));
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert!(
+            chunk["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("chatcmpl-")),
+            "chunk id must be a chatcmpl-... string"
+        );
+        assert_eq!(chunk["model"], "gemini-web-flash");
+        assert!(chunk["choices"].is_array(), "choices must be an array");
+    }
+}
+
+#[tokio::test]
+async fn stream_true_prefix_diff_produces_suffix_deltas_not_full_snapshots() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("^/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gemini_app_response()))
+        .mount(&mock_server)
+        .await;
+
+    // Two frames: first full text, second extends it.
+    let body = gemini_multi_frame_response(&["Part1", "Part1Part2"]);
+    Mock::given(method("POST"))
+        .and(path_regex("^/_/BardChatUi/data"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&mock_server)
+        .await;
+
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    spawn_server(state, srv_config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let raw = resp.text().await.unwrap();
+    let (data_lines, _) = parse_sse(&raw);
+
+    // Concatenate all delta content — must equal the full text without repetition.
+    let combined: String = data_lines
+        .iter()
+        .filter_map(|line| {
+            serde_json::from_str::<Value>(line).ok().and_then(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        })
+        .collect();
+
+    // If prefix-diff is correct the combined deltas should equal the full text.
+    assert_eq!(combined, "Part1Part2");
+}
+
+#[tokio::test]
+async fn stream_false_still_returns_json_object_not_sse() {
+    // Regression: adding stream=true routing must not break stream=false.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("^/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(gemini_app_response()))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("^/_/BardChatUi/data"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(gemini_stream_generate_response("Non-stream response")),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    spawn_server(state, srv_config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+}

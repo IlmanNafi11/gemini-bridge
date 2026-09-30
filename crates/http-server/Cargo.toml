@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+futures = { workspace = true }
 gemini-bridge-config = { path = "../config" }
 gemini-bridge-identity = { path = "../identity" }
 gemini-bridge-transport = { path = "../transport" }

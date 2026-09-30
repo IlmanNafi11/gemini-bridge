@@ -1,16 +1,27 @@
-//! Handler for `POST /v1/chat/completions` (non-streaming).
+//! Handler for `POST /v1/chat/completions` — both streaming (SSE) and non-streaming.
+//!
+//! When `stream: true` the response is an SSE text/event-stream where each
+//! `data:` line carries a `ChatCompletionChunk` JSON object, terminated by
+//! `data: [DONE]`.  When `stream: false` (the default) the full completion is
+//! returned as a single `ChatCompletionResponse` JSON object.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
 
-use gemini_bridge_llm_service::{ContentPart, LlmError, LlmRequest, Message, ModelSelector, Role};
+use gemini_bridge_llm_service::{
+    ContentPart, LlmError, LlmEvent, LlmRequest, Message, ModelSelector, Role,
+};
 use gemini_bridge_openai_compat::{
-    AssistantMessage, ChatChoice, ChatCompletionRequest, ChatCompletionResponse,
-    OpenAiErrorResponse, UsageInfo, new_completion_id, parse_model, unix_now,
+    AssistantMessage, ChatChoice, ChatChoiceDelta, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, DeltaContent, OpenAiErrorResponse, UsageInfo, new_completion_id,
+    parse_model, unix_now,
 };
 
 use crate::AppState;
@@ -49,6 +60,20 @@ pub async fn chat_completions(
         metadata,
     });
 
+    if req.stream {
+        stream_response(state, llm_req, model_name).await
+    } else {
+        non_stream_response(state, llm_req, model_name).await
+    }
+}
+
+// ── Non-streaming path ────────────────────────────────────────────────────────
+
+async fn non_stream_response(
+    state: AppState,
+    llm_req: Arc<LlmRequest>,
+    model_name: String,
+) -> Response {
     match state.adapter.complete(llm_req).await {
         Ok(completion) => {
             let usage = completion.usage.map(|u| UsageInfo {
@@ -78,6 +103,78 @@ pub async fn chat_completions(
         }
         Err(err) => map_llm_error(err).into_response(),
     }
+}
+
+// ── Streaming SSE path ────────────────────────────────────────────────────────
+
+async fn stream_response(
+    state: AppState,
+    llm_req: Arc<LlmRequest>,
+    model_name: String,
+) -> Response {
+    let event_stream = match state.adapter.stream(llm_req).await {
+        Ok(s) => s,
+        Err(err) => return map_llm_error(err).into_response(),
+    };
+
+    let completion_id = new_completion_id();
+    let created = unix_now();
+
+    // Translate each LlmEvent into an SSE `Event`.
+    let sse_stream = event_stream.map(move |ev| -> Result<Event, Infallible> {
+        let data = match ev {
+            Ok(LlmEvent::TextDelta(text)) => {
+                let chunk = ChatCompletionChunk {
+                    id: completion_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChatChoiceDelta {
+                        index: 0,
+                        delta: DeltaContent {
+                            role: None,
+                            content: Some(text),
+                        },
+                        finish_reason: None,
+                    }],
+                };
+                serde_json::to_string(&chunk).unwrap_or_default()
+            }
+            Ok(LlmEvent::Completed(summary)) => {
+                let chunk = ChatCompletionChunk {
+                    id: completion_id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChatChoiceDelta {
+                        index: 0,
+                        delta: DeltaContent {
+                            role: None,
+                            content: None,
+                        },
+                        finish_reason: Some(summary.finish_reason),
+                    }],
+                };
+                serde_json::to_string(&chunk).unwrap_or_default()
+            }
+            Ok(_) => return Ok(Event::default().comment("skip")),
+            Err(err) => {
+                // Surface provider errors as a final data event before close.
+                let msg = format!("{{\"error\":\"{}\"}}", err);
+                return Ok(Event::default().data(msg));
+            }
+        };
+        Ok(Event::default().data(data))
+    });
+
+    // Append the `[DONE]` sentinel required by the OpenAI SSE protocol.
+    let done =
+        futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
+    let combined = sse_stream.chain(done);
+
+    Sse::new(combined)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

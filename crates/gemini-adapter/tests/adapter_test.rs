@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use gemini_bridge_adapter_gemini::schema::{GeminiWebSchema, PathSegment};
 use gemini_bridge_adapter_gemini::{
     DefaultGeminiAdapter, GeminiAdapter, GeminiAdapterError, parse_non_stream_response,
@@ -8,7 +9,7 @@ use gemini_bridge_adapter_gemini::{
 use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
 use gemini_bridge_identity::{DefaultIdentityService, IdentityService};
 use gemini_bridge_llm_service::{
-    ContentPart, LlmAdapter, LlmError, LlmRequest, Message, ModelSelector, Role,
+    ContentPart, LlmAdapter, LlmRequest, Message, ModelSelector, Role,
 };
 use insta::assert_snapshot;
 use tempfile::tempdir;
@@ -117,7 +118,7 @@ async fn non_stream_request_success_through_wiremock() {
 }
 
 #[tokio::test]
-async fn llm_adapter_trait_implementation_routes_complete_and_rejects_stream() {
+async fn llm_adapter_trait_implementation_streams_parsed_events() {
     let server = MockServer::start().await;
     let (identity, _dir) = make_identity(&server).await;
     let config = make_config(_dir.path());
@@ -140,8 +141,23 @@ async fn llm_adapter_trait_implementation_routes_complete_and_rejects_stream() {
     let completion = adapter.complete(test_request()).await.unwrap();
     assert_eq!(completion.text, "Hello from the sanitized Gemini fixture.");
 
-    let stream_err = adapter.stream(test_request()).await.err().unwrap();
-    assert!(matches!(stream_err, LlmError::Unsupported("streaming")));
+    let events: Vec<_> = adapter
+        .stream(test_request())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        Ok(gemini_bridge_llm_service::LlmEvent::TextDelta(text))
+            if text == "Hello from the sanitized Gemini fixture."
+    ));
+    assert!(matches!(
+        &events[1],
+        Ok(gemini_bridge_llm_service::LlmEvent::Completed(summary))
+            if summary.finish_reason == "stop"
+    ));
 }
 
 #[tokio::test]
