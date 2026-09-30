@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.rej
+.env
+.env.*
+!.env.example
+*.log

@@ -1,0 +1,19 @@
+[package]
+name = "gemini-bridge-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+gemini-bridge-config = { path = "../config" }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true }
