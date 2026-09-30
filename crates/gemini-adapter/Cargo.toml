@@ -1,0 +1,24 @@
+[package]
+name = "gemini-bridge-adapter-gemini"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+url = { workspace = true }
+gemini-bridge-config = { path = "../config" }
+gemini-bridge-transport = { path = "../transport" }
+gemini-bridge-identity = { path = "../identity" }
+gemini-bridge-llm-service = { path = "../llm-service" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = { workspace = true }
+insta = { workspace = true }
+tempfile = "3"

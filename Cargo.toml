@@ -21,6 +21,8 @@ members = [
     "crates/config",
     "crates/transport",
     "crates/identity",
+    "crates/llm-service",
+    "crates/gemini-adapter",
 ]
 
 [workspace.package]
@@ -44,3 +46,6 @@ aes-gcm = "0.10"
 regex = "1"
 sha2 = "0.10"
 sha1 = "0.10"
+serde_json = "1"
+futures = "0.3"
+insta = "1"
