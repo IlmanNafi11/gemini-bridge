@@ -13,7 +13,7 @@
   - Verify: Manually compare `SPEC.md` capability table, graph, project structure, and PRD roadmap.
   - Files: `SPEC.md`
 
-- [ ] **P.2: Specify foundation modules** (`plugin-context`, `config`, `transport`)
+- [x] **P.2: Specify foundation modules** (`plugin-context`, `config`, `transport`)
   - Acceptance: Each module has objective, contract/dependencies, behavior, acceptance criteria, tests, and boundaries consistent with `SPEC.md`.
   - Verify: Check all three specs against the capability map and root six-area requirements.
   - Files: `docs/specs/SPEC-plugin-context.md`, `docs/specs/SPEC-config.md`, `docs/specs/SPEC-transport.md`
