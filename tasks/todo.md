@@ -105,7 +105,7 @@
 
 ## Fase 1 — MVP: streaming, images, files, resilience
 
-- [ ] **Task 1.1: Add streaming SSE chat path**
+- [x] **Task 1.1: Add streaming SSE chat path**
   - Acceptance: `stream=true` produces OpenAI SSE delta chunks and `[DONE]`; newline-framed Gemini snapshots and prefix changes are parsed; non-prefix rewrites follow the defined reset behavior.
   - Verify: Adapter unit/property boundary tests and `cargo test --test e2e_chat_test` asserting chunks, ordering, and terminal event.
   - Files: `crates/gemini-adapter/src/stream.rs`, `crates/gemini-adapter/src/prefix_diff.rs`, `crates/http-server/src/handlers/chat_stream.rs`, `tests/e2e_chat_test.rs`
