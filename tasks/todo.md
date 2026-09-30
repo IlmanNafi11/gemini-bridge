@@ -37,7 +37,7 @@
   - Files: `docs/specs/SPEC-media-store.md`, `docs/specs/SPEC-upload.md`, `docs/specs/SPEC-image-gen.md`
   - Depends on: P.4
 
-- [ ] **P.6: Specify continuity and operational path** (`conversation-store`, `health-admin`, `gallery`)
+- [x] **P.6: Specify continuity and operational path** (`conversation-store`, `health-admin`, `gallery`)
   - Acceptance: Specs define durable conversation/branch behavior, health/admin/session states, and gallery operations against their upstream module contracts.
   - Verify: Trace US-4, US-6, and US-8 acceptance criteria to these specs.
   - Files: `docs/specs/SPEC-conversation-store.md`, `docs/specs/SPEC-health-admin.md`, `docs/specs/SPEC-gallery.md`
