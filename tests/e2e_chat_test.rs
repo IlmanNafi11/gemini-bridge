@@ -95,7 +95,7 @@ async fn make_state(
     );
 
     let adapter = Arc::new(
-        DefaultGeminiAdapter::with_base_url(identity, config.clone(), wiremock_uri)
+        DefaultGeminiAdapter::with_base_url(identity.clone(), config.clone(), wiremock_uri)
             .expect("adapter"),
     );
 
@@ -111,6 +111,7 @@ async fn make_state(
             adapter,
             upload_service: None,
             image_service: None,
+            health_admin: gemini_bridge_http_server::build_health_admin(Some(identity.clone())),
         },
         srv_config,
     )

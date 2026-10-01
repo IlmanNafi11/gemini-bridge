@@ -16,6 +16,7 @@ use axum::{Json, Router, routing};
 use thiserror::Error;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
+use gemini_bridge_health_admin::{DefaultHealthAdminService, HealthAdminService};
 use gemini_bridge_llm_service::LlmAdapter;
 use gemini_bridge_openai_compat::OpenAiErrorResponse;
 
@@ -38,6 +39,8 @@ pub struct AppState {
     pub upload_service: Option<Arc<dyn gemini_bridge_upload::UploadService>>,
     /// Image generation/retrieval service; `None` disables `/v1/images` routes.
     pub image_service: Option<Arc<dyn gemini_bridge_image_gen::ImageGenService>>,
+    /// Process and session operations used by health/admin routes.
+    pub health_admin: Arc<dyn HealthAdminService>,
 }
 
 #[derive(Debug, Error)]
@@ -54,8 +57,6 @@ pub enum ServerError {
 /// `TcpListener` and calls `axum::serve`.
 pub fn build_router(config: ServerConfig, state: AppState) -> Router {
     let x_request_id = header::HeaderName::from_static("x-request-id");
-
-    // Auth middleware is applied conditionally per route group below.
     let api_key = config.api_key.clone();
 
     let public_routes = Router::new()
@@ -78,10 +79,27 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
             routing::post(handlers::images::generate_image),
         )
         .route("/v1/images/{id}", routing::get(handlers::images::get_image))
-        .route_layer(middleware::from_fn_with_state(api_key, auth_middleware));
+        .route_layer(middleware::from_fn_with_state(
+            api_key.clone(),
+            auth_middleware,
+        ));
+
+    let health_routes = Router::new()
+        .route("/healthz", routing::get(handlers::health::healthz))
+        .route("/readyz", routing::get(handlers::health::readyz));
+
+    let admin_routes = Router::new()
+        .route("/admin/status", routing::get(handlers::admin::admin_status))
+        .route("/admin/reauth", routing::post(handlers::admin::reauth))
+        .route_layer(middleware::from_fn_with_state(
+            api_key,
+            admin_auth_middleware,
+        ));
 
     Router::new()
         .merge(public_routes)
+        .merge(health_routes)
+        .merge(admin_routes)
         .with_state(state)
         .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
@@ -112,4 +130,44 @@ async fn auth_middleware(
         }
     }
     next.run(request).await
+}
+
+async fn admin_auth_middleware(
+    State(api_key): State<Option<String>>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(expected) = api_key else {
+        let body = OpenAiErrorResponse::with_code(
+            "Admin API key is not configured",
+            "authentication_error",
+            "invalid_api_key",
+        );
+        return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+    };
+
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected);
+
+    if !authorized {
+        let body = OpenAiErrorResponse::with_code(
+            "Unauthorized",
+            "authentication_error",
+            "invalid_api_key",
+        );
+        return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+    }
+
+    next.run(request).await
+}
+
+/// Create a health/admin service for an optional identity provider.
+pub fn build_health_admin(
+    identity: Option<Arc<dyn gemini_bridge_identity::IdentityService>>,
+) -> Arc<dyn HealthAdminService> {
+    Arc::new(DefaultHealthAdminService::new(identity))
 }

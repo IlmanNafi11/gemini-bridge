@@ -1,0 +1,15 @@
+[package]
+name = "gemini-bridge-health-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+gemini-bridge-identity = { path = "../identity" }
+
+[dev-dependencies]
+tokio = { workspace = true }
+http = { workspace = true }

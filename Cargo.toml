@@ -51,6 +51,7 @@ members = [
     "crates/media-store",
     "crates/upload",
     "crates/image-gen",
+    "crates/health-admin",
 ]
 
 [workspace.package]
