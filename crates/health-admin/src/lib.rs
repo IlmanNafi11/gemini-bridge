@@ -2,9 +2,11 @@
 
 pub mod purge;
 pub mod readiness;
-
+pub mod reload_handler;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use gemini_bridge_identity::{IdentityService, SessionStatus};
@@ -33,9 +35,21 @@ pub trait HealthAdminService: Send + Sync {
     async fn reload_plugin(&self, plugin_name: &str) -> Result<(), HealthAdminError>;
 }
 
+/// A prepared replacement whose commit performs only the atomic publication.
+pub type ReloadCommit = Box<dyn FnOnce() + Send>;
+
+/// Trait for preparing built-in instance replacements.
+#[async_trait]
+pub trait PluginReloader: Send + Sync {
+    /// Fully initialize and validate a replacement without changing live state.
+    async fn prepare(&self, plugin_name: &str) -> Result<ReloadCommit, HealthAdminError>;
+}
+
 /// Default implementation of [`HealthAdminService`].
 pub struct DefaultHealthAdminService {
     identity_service: Option<Arc<dyn IdentityService>>,
+    reloader: Option<Arc<dyn PluginReloader>>,
+    reload_lock: Mutex<()>,
     start_time: Instant,
     version: &'static str,
 }
@@ -45,6 +59,8 @@ impl DefaultHealthAdminService {
     pub fn new(identity_service: Option<Arc<dyn IdentityService>>) -> Self {
         Self {
             identity_service,
+            reloader: None,
+            reload_lock: Mutex::new(()),
             start_time: Instant::now(),
             version: env!("CARGO_PKG_VERSION"),
         }
@@ -58,9 +74,17 @@ impl DefaultHealthAdminService {
     ) -> Self {
         Self {
             identity_service,
+            reloader: None,
+            reload_lock: Mutex::new(()),
             start_time,
             version,
         }
+    }
+
+    /// Attach the reloader implementation.
+    pub fn with_reloader(mut self, reloader: Arc<dyn PluginReloader>) -> Self {
+        self.reloader = Some(reloader);
+        self
     }
 }
 
@@ -175,8 +199,15 @@ impl HealthAdminService for DefaultHealthAdminService {
     }
 
     async fn reload_plugin(&self, plugin_name: &str) -> Result<(), HealthAdminError> {
-        Err(HealthAdminError::ReloadFailed(format!(
-            "Reload for '{plugin_name}' is not supported in Fase 1"
-        )))
+        let _reload_guard = self.reload_lock.try_lock().map_err(|_| {
+            HealthAdminError::ReloadFailed("Another plugin reload is already in progress".into())
+        })?;
+        if let Some(reloader) = &self.reloader {
+            reload_handler::execute_reload_with_deadline(reloader.as_ref(), plugin_name).await
+        } else {
+            Err(HealthAdminError::ReloadFailed(format!(
+                "Reload for '{plugin_name}' is not supported in this configuration"
+            )))
+        }
     }
 }

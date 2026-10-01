@@ -16,9 +16,11 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
 use gemini_bridge_conversation_store::ConversationStore;
 use gemini_bridge_health_admin::{
-    DefaultHealthAdminService, HealthAdminService, MediaPurgeAdminService,
+    DefaultHealthAdminService, HealthAdminError, HealthAdminService, MediaPurgeAdminService,
+    PluginReloader, ReloadCommit,
 };
-use gemini_bridge_llm_service::LlmAdapter;
+use gemini_bridge_identity::DefaultIdentityService;
+use gemini_bridge_llm_service::{LlmAdapter, ReloadableAdapter};
 use gemini_bridge_middleware::{
     AdmissionDecision, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
 };
@@ -81,6 +83,8 @@ pub enum ServerError {
     Bind(String),
     #[error("serve error: {0}")]
     Serve(String),
+    #[error("adapter initialization failed: {0}")]
+    AdapterInitialization(String),
 }
 
 // ── Router builder ─────────────────────────────────────────────────────────────
@@ -163,7 +167,11 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
 
     let mut admin_routes = Router::new()
         .route("/admin/status", routing::get(handlers::admin::admin_status))
-        .route("/admin/reauth", routing::post(handlers::admin::reauth));
+        .route("/admin/reauth", routing::post(handlers::admin::reauth))
+        .route(
+            "/admin/reload-plugin",
+            routing::post(handlers::admin::reload_plugin),
+        );
     if state.media_purge.is_some() {
         admin_routes =
             admin_routes.route("/admin/purge", routing::post(handlers::admin::purge_media));
@@ -316,6 +324,59 @@ pub fn build_health_admin(
     identity: Option<Arc<dyn gemini_bridge_identity::IdentityService>>,
 ) -> Arc<dyn HealthAdminService> {
     Arc::new(DefaultHealthAdminService::new(identity))
+}
+
+/// Return type for [`build_reloadable_gemini_adapter`].
+pub type ReloadableGeminiAdapter = (Arc<dyn LlmAdapter>, Arc<dyn PluginReloader>);
+
+/// Construct a reloadable Gemini adapter and its production built-in reloader.
+///
+/// The returned proxy is used for chat requests; attach the returned reloader to
+/// `DefaultHealthAdminService::with_reloader` to enable the protected admin route.
+pub fn build_reloadable_gemini_adapter(
+    config: Arc<gemini_bridge_config::BridgeConfig>,
+    identity: Arc<DefaultIdentityService>,
+) -> Result<ReloadableGeminiAdapter, ServerError> {
+    let initial = Arc::new(
+        gemini_bridge_adapter_gemini::DefaultGeminiAdapter::new(identity.clone(), config.clone())
+            .map_err(|error| ServerError::AdapterInitialization(error.to_string()))?,
+    ) as Arc<dyn LlmAdapter>;
+    let proxy = Arc::new(ReloadableAdapter::new(initial));
+    let reloader = Arc::new(GeminiAdapterReloader {
+        slot: proxy.slot(),
+        config,
+        identity,
+    });
+    Ok((proxy, reloader))
+}
+
+struct GeminiAdapterReloader {
+    slot: gemini_bridge_plugin_context::ReloadableSlot<dyn LlmAdapter>,
+    config: Arc<gemini_bridge_config::BridgeConfig>,
+    identity: Arc<DefaultIdentityService>,
+}
+
+#[async_trait::async_trait]
+impl PluginReloader for GeminiAdapterReloader {
+    async fn prepare(&self, plugin_name: &str) -> Result<ReloadCommit, HealthAdminError> {
+        if plugin_name != "gemini-adapter" {
+            return Err(HealthAdminError::ReloadFailed(format!(
+                "Unknown plugin: {plugin_name}"
+            )));
+        }
+
+        let replacement = Arc::new(
+            gemini_bridge_adapter_gemini::DefaultGeminiAdapter::new(
+                self.identity.clone(),
+                self.config.clone(),
+            )
+            .map_err(|error| HealthAdminError::ReloadFailed(error.to_string()))?,
+        ) as Arc<dyn LlmAdapter>;
+        let slot = self.slot.clone();
+        Ok(Box::new(move || {
+            let _old_generation = slot.publish(replacement);
+        }))
+    }
 }
 
 /// Create the production tool-calling engine.

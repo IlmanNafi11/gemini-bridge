@@ -373,7 +373,7 @@ For explicit traceability, the following critical decisions were confirmed durin
 1. **Capability Scope:** Approved 18 modules structured across 7 dependency layers.
 2. **License:** MIT License.
 3. **Session Credentials:** Account policy uses project operator's designated Google account (configured locally/externally; never stored in git).
-4. **Plugin Architecture (initial release):** Built-in static registry with trait objects (zero `unsafe` dynamic loading in the initial release). The required Fase 3 reload mechanism remains undecided; see Open Architecture Decisions below.
+4. **Plugin Architecture:** Built-in static registry with trait objects and built-in instance replacement for reload (zero `unsafe` dynamic loading). Each request clones the active generation before awaiting work; `POST /admin/reload-plugin` publishes a fully initialized generation atomically via `tokio::sync::RwLock`, and the old generation's disposer runs only after its final request handle drops.
 5. **API Key Security:** Configurable via `bridge.toml` (default: optional on `127.0.0.1`, mandatory on non-localhost bindings and `/admin/*` routes).
 6. **Gallery UI:** Embedded lightweight static HTML UI served directly by binary (`include_str!`).
 7. **TLS/JA3 Fingerprinting:** Full JA3 impersonation client included in Fase 0 scope; the specific implementation must be validated against Gemini Web before closing Task 0.3.
@@ -386,7 +386,6 @@ For explicit traceability, the following critical decisions were confirmed durin
 
 These choices are intentionally unresolved and must be settled in the relevant module specification or implementation task; the alternatives below are not commitments:
 
-- **Fase 3 plugin reload:** Choose between replacing built-in plugin instances in-process and loading dynamic libraries (for example, with `libloading`). Preserve active streams either way. No dynamic-library ABI, `unsafe` policy, or implementation is approved yet.
 - **TLS/JA3 implementation:** Select and validate a client implementation/profile (the stack currently lists `boring` or custom `rustls` configuration as alternatives) against an actual Gemini Web request in Task 0.3.
 - **Configuration crate:** Select `figment` or `config` when specifying the config module.
 - **Credential encryption:** Define key derivation and nonce/storage handling for the optional AES-GCM path when specifying the identity module; `BRIDGE_SECRET` alone does not settle those details.

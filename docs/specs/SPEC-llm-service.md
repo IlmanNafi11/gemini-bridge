@@ -2,7 +2,7 @@
 
 **Module ID:** `llm-service`  
 **Crate:** `gemini-bridge-llm-service` (`crates/llm-service`)  
-**Phase:** Fase 0  
+**Phase:** Fase 0 (contract), Fase 3 (reloadable adapter generations)
 **Depends On:** `plugin-context`  
 **Parent Spec:** `SPEC.md` §2.1, PRD §4.1  
 **Status:** Approved Draft  
@@ -136,6 +136,15 @@ pub trait LlmAdapter: Send + Sync {
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError>;
 }
 
+pub struct ReloadableAdapter;
+impl ReloadableAdapter {
+    pub fn new(initial: Arc<dyn LlmAdapter>) -> Self;
+    pub fn from_slot(slot: ReloadableSlot<dyn LlmAdapter>) -> Self;
+    pub fn slot(&self) -> ReloadableSlot<dyn LlmAdapter>;
+    pub async fn prepare_replacement<F, Fut>(&self, constructor: F) -> Result<Box<dyn FnOnce() + Send>, LlmError>
+    where F: FnOnce() -> Fut + Send, Fut: Future<Output = Result<Arc<dyn LlmAdapter>, LlmError>> + Send;
+}
+
 pub trait LlmRouter: Send + Sync {
     fn adapter_for(&self, model: &ModelSelector) -> Result<Arc<dyn LlmAdapter>, LlmError>;
 }
@@ -151,6 +160,7 @@ pub trait LlmRouter: Send + Sync {
 4. Metadata accepts optional provider extensions while core message/result fields remain provider-neutral.
 5. Adding another adapter must not require changing the `LlmRequest`/`LlmEvent` core for provider-specific details.
 6. Dependency direction is `plugin-context` → `llm-service` contract registration and provider adapter → `llm-service`; `llm-service` never imports a provider adapter, `openai-compat`, or the HTTP server.
+7. `ReloadableAdapter` clones a generation handle before awaiting work; returned streams retain that handle until completion. Replacement construction completes before synchronous atomic publication, so timed-out preparation cannot expose a partial generation.
 
 ---
 
@@ -170,6 +180,7 @@ pub trait LlmRouter: Send + Sync {
 - Request immutability and model-routing tests, including unknown providers.
 - Error taxonomy tests verifying provider failures map without leaking provider types.
 - Dependency-boundary review verifies the crate contains no Gemini, Axum/OpenAI HTTP, credential, or storage imports.
+- Fase 3 reload tests prove new requests use the new generation while an in-flight stream completes on its original generation.
 - Fase 3 multi-adapter test proves the same request path can route to a second adapter.
 
 ---

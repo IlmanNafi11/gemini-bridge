@@ -632,6 +632,7 @@ dependencies = [
  "gemini-bridge-media-store",
  "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
+ "gemini-bridge-plugin-context",
  "gemini-bridge-tool-calling",
  "gemini-bridge-upload",
  "parking_lot",
@@ -761,6 +762,7 @@ dependencies = [
 name = "gemini-bridge-http-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
@@ -776,6 +778,7 @@ dependencies = [
  "gemini-bridge-llm-service",
  "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
+ "gemini-bridge-plugin-context",
  "gemini-bridge-tool-calling",
  "gemini-bridge-transport",
  "gemini-bridge-upload",
@@ -843,6 +846,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "gemini-bridge-plugin-context",
  "serde_json",
  "thiserror",
  "tokio",
@@ -893,6 +897,7 @@ dependencies = [
  "async-trait",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

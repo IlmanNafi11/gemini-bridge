@@ -2,12 +2,14 @@
 //!
 //! This crate must not import Gemini, Axum, OpenAI-HTTP, or storage crates.
 
+use gemini_bridge_plugin_context::{PluginGeneration, ReloadableSlot};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use thiserror::Error;
 
 // ── Core types ───────────────────────────────────────────────────────────────
@@ -180,6 +182,74 @@ pub trait LlmAdapter: Send + Sync {
 
     /// Execute a streaming completion; returns an event stream.
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError>;
+}
+
+/// Provider-neutral adapter proxy backed by a replaceable built-in generation.
+///
+/// Each operation acquires an owned generation handle before awaiting adapter
+/// work. Streaming therefore retains the adapter that created its stream until
+/// the stream is complete, even if the current generation is replaced.
+pub struct ReloadableAdapter {
+    slot: ReloadableSlot<dyn LlmAdapter>,
+}
+
+impl ReloadableAdapter {
+    pub fn new(initial: Arc<dyn LlmAdapter>) -> Self {
+        Self::from_slot(ReloadableSlot::new(initial))
+    }
+
+    /// Create a proxy backed by a slot shared with an administrative reloader.
+    pub fn from_slot(slot: ReloadableSlot<dyn LlmAdapter>) -> Self {
+        Self { slot }
+    }
+
+    /// Access the replacement slot for an administrative reloader.
+    pub fn slot(&self) -> ReloadableSlot<dyn LlmAdapter> {
+        self.slot.clone()
+    }
+
+    /// Prepare a replacement adapter from an async constructor and return a commit closure.
+    pub async fn prepare_replacement<F, Fut>(
+        &self,
+        constructor: F,
+    ) -> Result<Box<dyn FnOnce() + Send>, LlmError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<Arc<dyn LlmAdapter>, LlmError>> + Send,
+    {
+        let replacement = constructor().await?;
+        let slot = self.slot.clone();
+        Ok(Box::new(move || {
+            let _old = slot.publish(replacement);
+        }))
+    }
+}
+
+#[async_trait]
+impl LlmAdapter for ReloadableAdapter {
+    fn provider_id(&self) -> &'static str {
+        "reloadable"
+    }
+
+    async fn complete(&self, request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        let generation: PluginGeneration<dyn LlmAdapter> = self.slot.get().await;
+        generation.complete(request).await
+    }
+
+    async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<serde_json::Value, LlmError> {
+        let generation: PluginGeneration<dyn LlmAdapter> = self.slot.get().await;
+        generation.complete_raw(request).await
+    }
+
+    async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        let generation: PluginGeneration<dyn LlmAdapter> = self.slot.get().await;
+        let stream = generation.stream(request).await?;
+        let retained_stream = stream.map(move |event| {
+            let _generation = &generation;
+            event
+        });
+        Ok(Box::pin(retained_stream))
+    }
 }
 
 /// Selects the correct adapter for a given model selector.

@@ -19,7 +19,7 @@ The `health-admin` module exposes process health, Gemini session readiness, admi
 - `/admin/status` — authenticated snapshot of the current session state for operator diagnostics.
 - `/admin/reauth` — guided re-authentication POST endpoint that triggers a fresh cookie import and re-bootstrap through `identity`, transitioning session state from `NeedsReauth` to `Valid`.
 - Bounded 405 build-label auto-recovery: when `gemini-adapter` detects a 405 response, the `health-admin` layer coordinates a single `identity.bootstrap()` refresh and one upstream retry. No second retry is issued.
-- (Fase 3) `/admin/reload-plugin` — hot-swap a named plugin instance without terminating active SSE streams. Implementation contract must be resolved before Task 3.3 through a separate design decision.
+- (Fase 3) `/admin/reload-plugin` — hot-swap a named plugin instance without terminating active SSE streams. Implemented via built-in instance replacement wrapped in `Arc<tokio::sync::RwLock<T>>` to ensure active streams hold their older `Arc` securely.
 
 **Out of scope:**
 - HTTP routing infrastructure, SSE streaming (→ `http-server`).
@@ -123,7 +123,7 @@ pub trait HealthAdminService: Send + Sync {
     /// Attempt guided re-authentication by importing new credentials via identity bootstrap.
     async fn reauth(&self, raw_cookie_header: &str) -> Result<ReauthResponse, HealthAdminError>;
 
-    /// (Fase 3) Request a hot reload of a named plugin.
+    /// (Fase 3) Request a hot reload of a named plugin via built-in instance replacement.
     /// Returns `Err(ReloadFailed)` if reload exceeds the 2-second deadline or active
     /// streams cannot safely buffer the transition.
     async fn reload_plugin(&self, plugin_name: &str) -> Result<(), HealthAdminError>;
@@ -161,7 +161,7 @@ pub trait HealthAdminService: Send + Sync {
    `/healthz`, `/readyz`, `/admin/status`, and `/admin/reauth` responses must not include raw cookie values, token hashes, or any secret credential fields. Responses reflect state indicators (status, timestamps) only.
 
 7. **Reload Safety (Fase 3):**
-   `/admin/reload-plugin` must buffer active SSE connection state, dispose the old plugin instance via its `Disposer`, re-initialize the new instance, verify readiness, and resume. Active SSE requests must complete successfully without disconnection. Reload must complete within 2 seconds. If reload does not complete in 2 seconds or fails, an error is returned without forcing active stream termination. The implementation contract for reload (built-in instance replacement vs. dynamic library loading) must be recorded in a design decision document before Task 3.3.
+   The reloader asynchronously prepares and validates an unpublished built-in generation. Only after preparation succeeds within the two-second deadline does a synchronous atomic commit publish it. Initialization failure or timeout leaves the currently active generation unchanged. Concurrent reload requests are serialized. Active SSE requests retain their original generation and complete successfully.
 
 ---
 
@@ -198,10 +198,16 @@ pub trait HealthAdminService: Send + Sync {
 6. **Uptime Monotonicity Test:**
    - Two sequential `GET /healthz` calls return non-decreasing `uptime_secs`.
 
+7. **Reload Generation Tests:**
+   - A protected `POST /admin/reload-plugin` swaps a fully initialized built-in generation and maps failures to `reload_failed`.
+   - A stream started before the swap completes with `[DONE]` on the old generation while a later request uses the new generation.
+   - The old generation disposer runs only after the final in-flight generation handle is dropped.
+   - Reload execution is bounded by a two-second timeout.
+
 ---
 
 ## 6. Boundaries
 
 - **Always:** Return HTTP 200 from `/healthz` while the process is alive; derive session state from `IdentityService::snapshot()` without direct upstream network calls in the hot path; require API key for all `/admin/*` endpoints; bound 405 recovery to one bootstrap + one retry; exclude raw credential values from all responses.
-- **Ask First:** Adding new admin endpoints, changing health or readiness response schemas, or implementing the reload mechanism before the design decision in Task 3.3 is finalized.
-- **Never:** Expose raw cookie values, auth tokens, or SAPISIDHASH in any response; retry 405 more than once per original request; implement reload without the prior design decision being approved.
+- **Ask First:** Adding new admin endpoints or changing health or readiness response schemas.
+- **Never:** Expose raw cookie values, auth tokens, or SAPISIDHASH in any response; retry 405 more than once per original request; implement unsafe dynamic library loading for reload.

@@ -2,9 +2,9 @@
 
 **Module ID:** `plugin-context`  
 **Crate:** `gemini-bridge-plugin-context` (`crates/plugin-context`)  
-**Phase:** Fase 0 (Foundation)  
-**Parent Spec:** `SPEC.md` §2.1  
-**Status:** Approved Draft  
+**Phase:** Fase 0 (Foundation), Fase 3 (built-in service reload)
+**Parent Spec:** `SPEC.md` §2.1
+**Status:** Approved Draft — built-in instance replacement decision recorded in root SPEC.md §10
 
 ---
 
@@ -72,6 +72,14 @@ impl PluginContext {
     pub fn register_disposer(&mut self, disposer: Disposer);
     pub async fn teardown(&mut self) -> Result<(), PluginError>;
 }
+
+/// Clonable slot for atomically replacing a built-in service generation.
+pub struct ReloadableSlot<T: ?Sized>;
+impl<T: ?Sized> ReloadableSlot<T> {
+    pub fn new(initial: Arc<T>) -> Self;
+    pub async fn get(&self) -> Arc<T>;
+    pub async fn swap(&self, replacement: Arc<T>) -> Arc<T>;
+}
 ```
 
 ---
@@ -82,7 +90,7 @@ impl PluginContext {
 2. **Deterministic Teardown:** Disposers are executed in reverse order of registration (LIFO) during `teardown()`.
 3. **Event Bus Immutability:** Events dispatched under `Waterfall` mode take an owned payload and return the modified payload. Events under `Emit`, `Parallel`, and `Serial` operate on immutable references.
 4. **Thread Safety:** All container contents must satisfy `Send + Sync + 'static`.
-5. **No Dynamic Loading (v1):** The initial registry is strictly in-repo static traits.
+5. **No Dynamic Loading:** The registry remains statically linked; Fase 3 reload replaces built-in instances only and uses safe `Arc` ownership to retain old generations while existing requests drain.
 
 ---
 
@@ -93,6 +101,7 @@ impl PluginContext {
   - Event bus dispatch modes (`Emit`, `Waterfall`, `Serial`, `Parallel`, `Bail`) with mock handler counters.
   - Teardown order verification (LIFO execution of disposers).
 - **Quality Gate:** 100% test pass, zero warnings on clippy.
+- Fase 3 reload publishes replacements synchronously only after asynchronous preparation completes; the short publish operation must not await or block an async runtime worker.
 
 ---
 

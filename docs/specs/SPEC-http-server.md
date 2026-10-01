@@ -83,6 +83,15 @@ pub async fn start_server(
     config: ServerConfig,
     state: AppState,
 ) -> Result<(), ServerError>;
+
+/// Return type for [`build_reloadable_gemini_adapter`].
+pub type ReloadableGeminiAdapter = (Arc<dyn LlmAdapter>, Arc<dyn PluginReloader>);
+
+/// Construct the production Gemini generation slot and matching built-in reloader.
+pub fn build_reloadable_gemini_adapter(
+    config: Arc<BridgeConfig>,
+    identity: Arc<DefaultIdentityService>,
+) -> Result<ReloadableGeminiAdapter, ServerError>;
 ```
 
 ### 2.3 Route Table Across Phases
@@ -183,7 +192,9 @@ pub async fn start_server(
 | `GET /readyz` → session status, build label, cookie age | Registered in route table (Fase 1 handler) |
 | `POST /admin/reauth` → guided reauthentication | Registered in route table (Fase 1 handler, auth-gated) |
 | Structured JSON logging with `x-request-id` | `SetRequestIdLayer` + `PropagateRequestIdLayer` |
-| Plugin reload without dropping active streams | `POST /admin/reload-plugin` route + streaming task decoupling |
+| Plugin reload without dropping active streams | Protected `POST /admin/reload-plugin` route + `ReloadableAdapter` generation retention |
+
+The reload route accepts `{"plugin":"<name>"}`. It returns HTTP 200 only after the named built-in replacement is ready and published; initialization failure, unknown plugin, or deadline expiry returns a structured `reload_failed` error without replacing the active generation.
 
 ### Acceptance criteria (module-level)
 

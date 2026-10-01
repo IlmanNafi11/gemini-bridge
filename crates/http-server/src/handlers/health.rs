@@ -64,6 +64,40 @@ pub async fn reauth(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct ReloadPluginRequest {
+    plugin: String,
+}
+
+/// `POST /admin/reload-plugin`: replace a built-in plugin instance atomically.
+pub async fn reload_plugin(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: ReloadPluginRequest = match serde_json::from_slice::<ReloadPluginRequest>(&body) {
+        Ok(request) if !request.plugin.trim().is_empty() => request,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "Invalid reload request; expected JSON containing a non-empty plugin field",
+                        "type": "invalid_request_error",
+                        "code": "invalid_reload_request"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.health_admin.reload_plugin(&request.plugin).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({"status": "ok", "plugin": request.plugin})),
+        )
+            .into_response(),
+        Err(error) => reauth_error(error),
+    }
+}
+
 /// `POST /admin/purge`: remove expired cached media and metadata.
 pub async fn purge_media(State(state): State<AppState>) -> Response {
     let Some(service) = &state.media_purge else {
@@ -97,9 +131,11 @@ fn reauth_error(error: HealthAdminError) -> Response {
             "Unauthorized".to_owned(),
             "invalid_api_key",
         ),
-        HealthAdminError::ReloadFailed(message) => {
-            (StatusCode::NOT_IMPLEMENTED, message, "reload_not_supported")
-        }
+        HealthAdminError::ReloadFailed(_message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Plugin reload failed".to_owned(),
+            "reload_failed",
+        ),
         HealthAdminError::PurgeFailed(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             message,
