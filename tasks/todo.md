@@ -117,7 +117,7 @@
   - Files: `crates/media-store/Cargo.toml`, `crates/media-store/src/lib.rs`, `crates/media-store/src/store.rs`, `crates/media-store/src/cleanup.rs`
   - Depends on: Task 0.2
 
-- [ ] **Task 1.3: Deliver upload/reference-file endpoints**
+- [x] **Task 1.3: Deliver upload/reference-file endpoints**
   - Acceptance: `POST /v1/files` validates multipart size/type, stores bytes, uploads through resumable push flow and returns an ID; `GET /v1/files/{id}` retrieves stored file; same-content references reuse fileRef. URL references reject forbidden addresses/schemes with DNS pinning.
   - Verify: `cargo test -p gemini-bridge-upload`; mocked resumable upload; SSRF tests cover IPv4/IPv6 private, loopback, link-local, DNS changes, and redirects.
   - Files: `crates/upload/src/lib.rs`, `crates/upload/src/push_client.rs`, `crates/upload/src/ssrf.rs`, `crates/http-server/src/handlers/files.rs`, `tests/e2e_files_test.rs`
