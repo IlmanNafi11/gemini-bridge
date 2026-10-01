@@ -135,10 +135,10 @@
   - Files: `crates/health-admin/src/lib.rs`, `crates/health-admin/src/readiness.rs`, `crates/http-server/src/handlers/health.rs`, `crates/http-server/src/handlers/admin.rs`, `tests/health_admin_test.rs`
   - Depends on: Tasks 0.4, 0.7
 
-- [ ] **Task 1.6: Add cookie rotation and bounded 405 recovery**
+- [x] **Task 1.6: Add cookie rotation and bounded 405 recovery**
   - Acceptance: Stale `1PSIDTS` is refreshed; 405 triggers one bootstrap refresh and one retry; failed rotation sets `needs_reauth`; no retry loop or active stream drop.
   - Verify: `cargo test -p gemini-bridge-identity`; `cargo test --test resilience_drills_test` for success, retry failure, 429, and expiry.
-  - Files: `crates/identity/src/rotation.rs`, `crates/transport/src/retry.rs`, `crates/health-admin/src/session_status.rs`, `tests/resilience_drills_test.rs`
+  - Files: `crates/identity/src/rotation.rs`, `crates/gemini-adapter/src/lib.rs`, `crates/identity/src/session.rs`, `tests/resilience_drills_test.rs`
   - Depends on: Tasks 0.4, 1.1, 1.5
 
 - [ ] **Task 1.7: Integrate redaction, request IDs, audit and rate limiting**
