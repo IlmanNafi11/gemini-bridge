@@ -607,6 +607,7 @@ dependencies = [
  "gemini-bridge-image-gen",
  "gemini-bridge-llm-service",
  "gemini-bridge-media-store",
+ "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
  "gemini-bridge-upload",
  "parking_lot",
@@ -676,6 +677,7 @@ dependencies = [
  "gemini-bridge-identity",
  "gemini-bridge-image-gen",
  "gemini-bridge-llm-service",
+ "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
  "gemini-bridge-transport",
  "gemini-bridge-upload",
@@ -761,6 +763,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "gemini-bridge-middleware"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ gemini-bridge-openai-compat = { path = "../openai-compat" }
 gemini-bridge-upload = { path = "../upload" }
 gemini-bridge-image-gen = { path = "../image-gen" }
 gemini-bridge-health-admin = { path = "../health-admin" }
+gemini-bridge-middleware = { path = "../middleware" }
 
 [dev-dependencies]
 reqwest = { workspace = true }

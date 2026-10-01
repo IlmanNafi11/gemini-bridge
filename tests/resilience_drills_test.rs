@@ -97,6 +97,7 @@ async fn build_test_app(
             api_key: None,
             require_key_for_admin: false,
             cors_enabled: false,
+            rate_limit: None,
         },
         app_state,
     );
@@ -364,6 +365,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
                     api_key: None,
                     require_key_for_admin: false,
                     cors_enabled: false,
+                    rate_limit: None,
                 },
                 app_state,
             ),

@@ -117,6 +117,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             api_key: None,
             require_key_for_admin: false,
             cors_enabled: false,
+            rate_limit: None,
         },
         AppState {
             adapter,

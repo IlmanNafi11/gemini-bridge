@@ -7,18 +7,31 @@ pub mod handlers;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
+use serde_json::json;
 use thiserror::Error;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
 use gemini_bridge_health_admin::{DefaultHealthAdminService, HealthAdminService};
 use gemini_bridge_llm_service::LlmAdapter;
+use gemini_bridge_middleware::{
+    AdmissionDecision, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
+};
 use gemini_bridge_openai_compat::OpenAiErrorResponse;
+
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+#[derive(Clone)]
+struct PublicMiddlewareState {
+    api_key: Option<String>,
+    rate_limiter: Option<Arc<TokenBucketLimiter>>,
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -29,8 +42,9 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     pub require_key_for_admin: bool,
     pub cors_enabled: bool,
+    /// Optional per-client request rate limit for authenticated public routes.
+    pub rate_limit: Option<TokenBucketConfig>,
 }
-
 /// Shared state threaded through all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -80,8 +94,11 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         )
         .route("/v1/images/{id}", routing::get(handlers::images::get_image))
         .route_layer(middleware::from_fn_with_state(
-            api_key.clone(),
-            auth_middleware,
+            PublicMiddlewareState {
+                api_key: api_key.clone(),
+                rate_limiter: config.rate_limit.map(TokenBucketLimiter::new).map(Arc::new),
+            },
+            public_middleware,
         ));
 
     let health_routes = Router::new()
@@ -101,19 +118,20 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         .merge(health_routes)
         .merge(admin_routes)
         .with_state(state)
+        .layer(middleware::from_fn(audit_middleware))
         .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
 }
 
 // ── Authentication middleware ──────────────────────────────────────────────────
 
-async fn auth_middleware(
-    State(api_key): State<Option<String>>,
+async fn public_middleware(
+    State(state): State<PublicMiddlewareState>,
     headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Response {
-    if let Some(expected) = &api_key {
+    if let Some(expected) = &state.api_key {
         let authorized = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -129,7 +147,60 @@ async fn auth_middleware(
             return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
         }
     }
+
+    if let Some(limiter) = &state.rate_limiter {
+        let client_id = if state.api_key.is_some() {
+            "authenticated"
+        } else {
+            "anonymous"
+        };
+        if let AdmissionDecision::Reject {
+            retry_after,
+            error_type,
+            error_code,
+            ..
+        } = limiter.try_acquire(client_id, SystemTime::now())
+        {
+            let retry_after_secs = retry_after.as_secs().max(1);
+            let body =
+                OpenAiErrorResponse::with_code("Rate limit exceeded", error_type, error_code);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after_secs.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+
     next.run(request).await
+}
+
+async fn audit_middleware(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("missing-request-id")
+        .to_owned();
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+
+    let response = next.run(request).await;
+    let fields = RedactionFilter::redact_json(&json!({
+        "request_id": request_id,
+        "timestamp": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs(),
+        "method": method,
+        "path": path,
+        "status": response.status().as_u16(),
+        "duration_ms": started.elapsed().as_millis() as u64,
+    }));
+    tracing::info!(target: "gemini_bridge::audit", fields = %fields, "request completed");
+    response
 }
 
 async fn admin_auth_middleware(

@@ -136,6 +136,7 @@ fn build_test_router(
         api_key,
         require_key_for_admin: true,
         cors_enabled: false,
+        rate_limit: None,
     };
     // Use the NullLlmAdapter placeholder: build_router needs an adapter field.
     let adapter = Arc::new(NullAdapter);

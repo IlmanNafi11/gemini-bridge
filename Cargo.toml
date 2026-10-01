@@ -33,6 +33,7 @@ gemini-bridge-upload = { path = "crates/upload" }
 gemini-bridge-media-store = { path = "crates/media-store" }
 gemini-bridge-image-gen = { path = "crates/image-gen" }
 gemini-bridge-llm-service = { path = "crates/llm-service" }
+gemini-bridge-middleware = { path = "crates/middleware" }
 base64 = "0.22"
 futures = { workspace = true }
 parking_lot = { workspace = true }
@@ -52,6 +53,7 @@ members = [
     "crates/upload",
     "crates/image-gen",
     "crates/health-admin",
+    "crates/middleware",
 ]
 
 [workspace.package]

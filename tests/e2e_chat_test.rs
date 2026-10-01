@@ -104,6 +104,7 @@ async fn make_state(
         api_key,
         require_key_for_admin: false,
         cors_enabled: false,
+        rate_limit: None,
     };
 
     (
