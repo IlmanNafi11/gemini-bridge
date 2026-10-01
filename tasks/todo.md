@@ -156,10 +156,10 @@
 
 ## Fase 2 — v1.1: conversations, tools, gallery
 
-- [ ] **Task 2.1: Persist conversation and message state**
+- [x] **Task 2.1: Persist conversation and message state**
   - Acceptance: SQLite stores local conversation/message records and upstream identifiers transactionally; retrieval order and migrations are deterministic; stored state can reconstruct history.
-  - Verify: `cargo test -p gemini-bridge-conversation-store`; test transaction rollback, migration, and ordered retrieval.
-  - Files: `crates/conversation-store/src/lib.rs`, `crates/conversation-store/src/db.rs`, `crates/conversation-store/src/migrations.rs`, `crates/conversation-store/src/messages.rs`
+  - Verify: `cargo test -p gemini-bridge-conversation-store` (5 tests), `cargo test --workspace` (200 passed), workspace clippy and fmt checks pass.
+  - Files: `crates/conversation-store/Cargo.toml`, `crates/conversation-store/src/lib.rs`, `crates/conversation-store/src/db.rs`, `crates/conversation-store/src/migrations.rs`, `crates/conversation-store/src/models.rs`, `crates/conversation-store/src/error.rs`, `crates/conversation-store/tests/store_test.rs`
   - Depends on: Tasks 0.2, 0.7
 
 - [ ] **Task 2.2: Add continuity, history, branch and regenerate flows**
