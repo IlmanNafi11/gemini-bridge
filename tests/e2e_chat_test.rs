@@ -113,6 +113,7 @@ async fn make_state(
             upload_service: None,
             image_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(Some(identity.clone())),
+            conversation_store: None,
         },
         srv_config,
     )

@@ -88,6 +88,7 @@ async fn build_test_app(
         upload_service: None,
         image_service: None,
         health_admin,
+        conversation_store: None,
     };
 
     let (listener, port) = bind_listener().await;
@@ -353,6 +354,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
         upload_service: None,
         image_service: None,
         health_admin,
+        conversation_store: None,
     };
 
     let (listener, port) = bind_listener().await;

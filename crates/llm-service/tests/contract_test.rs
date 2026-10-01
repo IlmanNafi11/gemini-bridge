@@ -34,6 +34,7 @@ impl LlmAdapter for ContractAdapter {
                 prompt_tokens: 2,
                 completion_tokens: 1,
             }),
+            metadata: None,
         })
     }
 
@@ -126,9 +127,14 @@ fn provider_neutral_error_taxonomy_is_constructible() {
         LlmError::RateLimited,
         LlmError::Unavailable,
         LlmError::Unsupported("streaming"),
+        LlmError::ContinuityRejected,
         LlmError::Protocol("bad response".to_owned()),
     ];
     assert_eq!(errors[3].to_string(), "unsupported capability: streaming");
+    assert_eq!(
+        errors[4].to_string(),
+        "provider rejected conversation continuation identifiers"
+    );
 
     let call = ToolCall {
         id: "call-1".to_owned(),

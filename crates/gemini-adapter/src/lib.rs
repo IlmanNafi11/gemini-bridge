@@ -265,10 +265,18 @@ impl DefaultGeminiAdapter {
     ) -> Result<Completion, GeminiAdapterError> {
         let body = self.execute_wire_with_recovery(request).await?;
         let text = parse_non_stream_response(&body, &self.schema)?;
+        let metadata = parse_non_stream_metadata(&body);
         Ok(Completion {
             text,
             finish_reason: "stop".to_owned(),
             usage: None,
+            metadata: metadata.map(|m| gemini_bridge_llm_service::ProviderMetadata {
+                raw: serde_json::json!({
+                    "conversation_id": m.conversation_id,
+                    "response_id": m.response_id,
+                    "candidate_id": m.candidate_id,
+                }),
+            }),
         })
     }
 }
@@ -462,6 +470,94 @@ pub(crate) fn find_candidate_text(
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+/// Parse Gemini response frames and extract conversation/response/candidate identifiers.
+pub fn parse_non_stream_metadata(body: &[u8]) -> Option<GeminiWebMetadata> {
+    let response = std::str::from_utf8(body).ok()?;
+    let mut meta = GeminiWebMetadata::default();
+    let mut found_any = false;
+
+    for line in response.lines().map(str::trim) {
+        if line.is_empty() || line == ")]}'" || line.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if extract_metadata_recursive(&value, &mut meta) {
+            found_any = true;
+        }
+    }
+
+    if found_any
+        || meta.conversation_id.is_some()
+        || meta.response_id.is_some()
+        || meta.candidate_id.is_some()
+    {
+        Some(meta)
+    } else {
+        None
+    }
+}
+
+fn extract_metadata_recursive(value: &Value, meta: &mut GeminiWebMetadata) -> bool {
+    let mut found = false;
+
+    if let Value::Object(map) = value {
+        if let Some(Value::String(cid)) = map
+            .get("conversation_id")
+            .or_else(|| map.get("conversationId"))
+        {
+            meta.conversation_id = Some(cid.clone());
+            found = true;
+        }
+        if let Some(Value::String(rid)) = map.get("response_id").or_else(|| map.get("responseId")) {
+            meta.response_id = Some(rid.clone());
+            found = true;
+        }
+        if let Some(Value::String(cand)) =
+            map.get("candidate_id").or_else(|| map.get("candidateId"))
+        {
+            meta.candidate_id = Some(cand.clone());
+            found = true;
+        }
+        if let Some(Value::Array(candidates)) = map.get("candidates")
+            && let Some(first_cand) = candidates.first()
+            && let Some(Value::String(cand)) = first_cand
+                .get("candidateId")
+                .or_else(|| first_cand.get("candidate_id"))
+        {
+            meta.candidate_id = Some(cand.clone());
+            found = true;
+        }
+    }
+
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                if extract_metadata_recursive(item, meta) {
+                    found = true;
+                }
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                if extract_metadata_recursive(v, meta) {
+                    found = true;
+                }
+            }
+        }
+        Value::String(encoded) => {
+            if let Ok(child) = serde_json::from_str::<Value>(encoded)
+                && extract_metadata_recursive(&child, meta)
+            {
+                found = true;
+            }
+        }
+        _ => {}
+    }
+
+    found
 }
 
 fn map_identity_error(error: IdentityError) -> GeminiAdapterError {

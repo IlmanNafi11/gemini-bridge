@@ -124,6 +124,8 @@ pub struct Completion {
     pub text: String,
     pub finish_reason: String,
     pub usage: Option<Usage>,
+    /// Provider response metadata kept opaque at this layer.
+    pub metadata: Option<ProviderMetadata>,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -142,6 +144,8 @@ pub enum LlmError {
     Unavailable,
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
+    #[error("provider rejected conversation continuation identifiers")]
+    ContinuityRejected,
     #[error("provider protocol error: {0}")]
     Protocol(String),
 }

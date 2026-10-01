@@ -145,6 +145,7 @@ fn build_test_router(
         upload_service: None,
         image_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(Some(identity)),
+        conversation_store: None,
     };
     (build_router(cfg, state), port)
 }

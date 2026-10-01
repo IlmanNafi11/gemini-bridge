@@ -1,5 +1,7 @@
 //! Transactional SQLite persistence for Gemini Bridge conversations.
 
+mod branch;
+
 mod db;
 mod error;
 mod migrations;
@@ -42,4 +44,13 @@ pub trait ConversationStore: Send + Sync {
     ) -> Result<Vec<Conversation>, ConversationStoreError>;
 
     async fn delete_conversation(&self, id: &str) -> Result<(), ConversationStoreError>;
+
+    /// Create a branched conversation from `from_message_id`, copying ancestor
+    /// history and seeding upstream IDs from that message's snapshot.
+    async fn branch_from(
+        &self,
+        source_conversation_id: &str,
+        from_message_id: &str,
+        title: Option<String>,
+    ) -> Result<Conversation, ConversationStoreError>;
 }

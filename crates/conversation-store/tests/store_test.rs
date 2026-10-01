@@ -162,3 +162,70 @@ async fn append_rejects_a_message_for_a_missing_conversation() {
         .await;
     assert!(matches!(result, Err(ConversationStoreError::NotFound(_))));
 }
+#[tokio::test]
+async fn branch_copies_only_selected_ancestor_and_uses_its_upstream_snapshot() {
+    let store = SqliteConversationStore::in_memory().unwrap();
+    let source = store
+        .create_conversation(Some("original".to_owned()))
+        .await
+        .unwrap();
+
+    for sequence_number in 1..=5 {
+        let mut message = make_message(
+            &source.id,
+            sequence_number,
+            if sequence_number % 2 == 1 {
+                "user"
+            } else {
+                "assistant"
+            },
+        );
+        message.id = format!("source-{sequence_number}");
+        if sequence_number == 3 {
+            message.upstream_conversation_id = Some("conversation-at-3".to_owned());
+            message.upstream_response_id = Some("response-at-3".to_owned());
+            message.upstream_candidate_id = Some("candidate-at-3".to_owned());
+        }
+        if sequence_number == 5 {
+            message.upstream_conversation_id = Some("conversation-at-5".to_owned());
+            message.upstream_response_id = Some("response-at-5".to_owned());
+            message.upstream_candidate_id = Some("candidate-at-5".to_owned());
+        }
+        store.append_message(message).await.unwrap();
+    }
+
+    let branch = store
+        .branch_from(&source.id, "source-3", Some("alternate".to_owned()))
+        .await
+        .unwrap();
+    let branch_history = store.get_history(&branch.id).await.unwrap();
+    let source_history = store.get_history(&source.id).await.unwrap();
+
+    assert_eq!(branch.parent_id.as_deref(), Some(source.id.as_str()));
+    assert_eq!(branch.parent_message_id.as_deref(), Some("source-3"));
+    assert_eq!(branch.title.as_deref(), Some("alternate"));
+    assert_eq!(
+        branch_history
+            .iter()
+            .map(|message| message.sequence_number)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        branch_history[2].content_json,
+        source_history[2].content_json
+    );
+    assert_eq!(
+        branch.upstream_conversation_id.as_deref(),
+        Some("conversation-at-3")
+    );
+    assert_eq!(
+        branch.upstream_response_id.as_deref(),
+        Some("response-at-3")
+    );
+    assert_eq!(
+        branch.upstream_candidate_id.as_deref(),
+        Some("candidate-at-3")
+    );
+    assert_eq!(source_history.len(), 5);
+}

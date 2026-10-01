@@ -59,6 +59,7 @@ impl LlmAdapter for ImageAdapter {
             text: format!("Generated image: {}", self.image_url),
             finish_reason: "stop".to_owned(),
             usage: None,
+            metadata: None,
         })
     }
 
@@ -141,6 +142,7 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
             upload_service: Some(upload),
             image_service: Some(image_service),
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            conversation_store: None,
         },
     );
     let server = spawn_server(router, port).await;
@@ -220,6 +222,7 @@ async fn b64_response_decodes_to_generated_image_bytes() {
             upload_service: Some(upload),
             image_service: Some(service),
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            conversation_store: None,
         },
     );
     let server = spawn_server(router, port).await;
@@ -276,6 +279,7 @@ async fn missing_image_id_returns_not_found() {
             upload_service: Some(upload),
             image_service: Some(service),
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            conversation_store: None,
         },
     );
     let server = spawn_server(router, port).await;

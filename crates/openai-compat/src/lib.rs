@@ -76,6 +76,8 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
     pub tools: Option<Vec<ToolSpec>>,
     pub tool_choice: Option<serde_json::Value>,
+    /// Optional internal conversation ID for continuation.
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

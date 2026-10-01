@@ -325,4 +325,21 @@ impl crate::ConversationStore for SqliteConversationStore {
         .await
         .map_err(|e| ConversationStoreError::Migration(format!("task join error: {e}")))?
     }
+    async fn branch_from(
+        &self,
+        source_conversation_id: &str,
+        from_message_id: &str,
+        title: Option<String>,
+    ) -> Result<Conversation, ConversationStoreError> {
+        let conn = self.conn.clone();
+        let source_id = source_conversation_id.to_owned();
+        let from_msg_id = from_message_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().unwrap();
+            crate::branch::execute_branch(&mut conn, &source_id, &from_msg_id, title)
+        })
+        .await
+        .map_err(|e| ConversationStoreError::Migration(format!("task join error: {e}")))?
+    }
 }

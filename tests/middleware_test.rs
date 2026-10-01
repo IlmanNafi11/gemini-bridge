@@ -73,6 +73,7 @@ impl LlmAdapter for MockAdapter {
                 prompt_tokens: 5,
                 completion_tokens: 5,
             }),
+            metadata: None,
         })
     }
 
@@ -123,6 +124,7 @@ fn build_test_router_with_rate_limit(
         upload_service: None,
         image_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(Some(identity)),
+        conversation_store: None,
     };
     (build_router(cfg, state), port)
 }

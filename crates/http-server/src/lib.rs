@@ -18,6 +18,7 @@ use serde_json::json;
 use thiserror::Error;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
+use gemini_bridge_conversation_store::ConversationStore;
 use gemini_bridge_health_admin::{DefaultHealthAdminService, HealthAdminService};
 use gemini_bridge_llm_service::LlmAdapter;
 use gemini_bridge_middleware::{
@@ -55,6 +56,8 @@ pub struct AppState {
     pub image_service: Option<Arc<dyn gemini_bridge_image_gen::ImageGenService>>,
     /// Process and session operations used by health/admin routes.
     pub health_admin: Arc<dyn HealthAdminService>,
+    /// Conversation persistence; `None` disables `/v1/conversations` routes.
+    pub conversation_store: Option<Arc<dyn ConversationStore>>,
 }
 
 #[derive(Debug, Error)]
@@ -93,6 +96,22 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
             routing::post(handlers::images::generate_image),
         )
         .route("/v1/images/{id}", routing::get(handlers::images::get_image))
+        .route(
+            "/v1/conversations",
+            routing::get(handlers::conversations::list_conversations),
+        )
+        .route(
+            "/v1/conversations/{id}/messages",
+            routing::get(handlers::conversations::get_messages),
+        )
+        .route(
+            "/v1/conversations/{id}/branch",
+            routing::post(handlers::conversations::branch_conversation),
+        )
+        .route(
+            "/v1/conversations/{id}/regenerate",
+            routing::post(handlers::conversations::regenerate_conversation),
+        )
         .route_layer(middleware::from_fn_with_state(
             PublicMiddlewareState {
                 api_key: api_key.clone(),
