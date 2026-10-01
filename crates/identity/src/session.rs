@@ -32,7 +32,7 @@ struct IdentityState {
     credentials: Option<SessionCredentials>,
     last_bootstrap: Option<SessionBootstrap>,
     status: SessionStatus,
-    /// Incremented after every successful rotation.
+    /// Incremented after every completed rotation attempt.
     refresh_epoch: u64,
 }
 
@@ -164,7 +164,11 @@ impl IdentityService for DefaultIdentityService {
         let creds = {
             let state = self.state.lock();
             if state.refresh_epoch != observed_epoch {
-                return Ok(());
+                return match state.status {
+                    SessionStatus::Valid => Ok(()),
+                    SessionStatus::IpFlagged => Err(IdentityError::IpFlagged),
+                    _ => Err(IdentityError::NeedsReauth),
+                };
             }
             state
                 .credentials
@@ -197,6 +201,7 @@ impl IdentityService for DefaultIdentityService {
                 } else {
                     SessionStatus::NeedsReauth
                 };
+                state.refresh_epoch += 1;
                 Err(error)
             }
         }
