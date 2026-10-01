@@ -246,15 +246,13 @@ impl DefaultGeminiAdapter {
         match self.execute_wire_request(request).await {
             Ok(body) => Ok(body),
             Err(GeminiAdapterError::StaleBuildLabel) => {
-                // `execute_wire_request` bootstraps before every upstream call,
-                // so invoking it once more performs exactly one refresh and one retry.
+                // Re-executing wire request performs one fresh bootstrap and one retry.
+                // If bootstrap or the retry request fails, map to a 502 bad gateway error.
                 match self.execute_wire_request(request).await {
-                    Err(GeminiAdapterError::StaleBuildLabel) => {
-                        Err(GeminiAdapterError::SchemaMismatch(
-                            "upstream returned 405 after build-label refresh".to_owned(),
-                        ))
-                    }
-                    other => other,
+                    Ok(body) => Ok(body),
+                    Err(_) => Err(GeminiAdapterError::SchemaMismatch(
+                        "upstream 405 recovery failed on refresh or retry".to_owned(),
+                    )),
                 }
             }
             other => other,

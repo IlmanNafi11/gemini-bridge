@@ -219,6 +219,50 @@ async fn drill_405_double_failure_returns_502() {
     );
 }
 
+/// A 405 followed by a failed bootstrap refresh is reported as 502 and is not retried.
+#[tokio::test]
+async fn drill_405_refresh_failure_returns_502_without_retry() {
+    let upstream = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+
+    let app_calls = Arc::new(AtomicU32::new(0));
+    let app_calls_for_response = app_calls.clone();
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(move |_: &wiremock::Request| {
+            if app_calls_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_string(APP_HTML)
+            } else {
+                ResponseTemplate::new(401)
+            }
+        })
+        .mount(&upstream)
+        .await;
+
+    let post_calls = Arc::new(AtomicU32::new(0));
+    let post_calls_for_response = post_calls.clone();
+    Mock::given(method("POST"))
+        .and(path_regex(r"/.*StreamGenerate.*"))
+        .respond_with(move |_: &wiremock::Request| {
+            post_calls_for_response.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(405)
+        })
+        .mount(&upstream)
+        .await;
+
+    let (base, client, _server) = build_test_app(&upstream, tmp.path()).await;
+    let response = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&chat_body())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status().as_u16(), 502);
+    assert_eq!(app_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(post_calls.load(Ordering::SeqCst), 1);
+}
+
 /// E2-3: A 429 from upstream is forwarded as 429 to the client;
 /// no 405 bootstrap-retry logic fires.
 #[tokio::test]
