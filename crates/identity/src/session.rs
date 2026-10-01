@@ -10,9 +10,9 @@ use gemini_bridge_transport::{Idempotency, ReqwestTransport, TransportRequest, T
 use crate::error::IdentityError;
 use crate::model::{SessionBootstrap, SessionCredentials, SessionSnapshot, SessionStatus};
 use crate::parser;
+use crate::rotation;
 use crate::storage;
 
-/// The public identity service trait.
 #[async_trait]
 pub trait IdentityService: Send + Sync {
     /// Bootstrap the Gemini session by hitting `/app` and extracting tokens.
@@ -32,6 +32,8 @@ struct IdentityState {
     credentials: Option<SessionCredentials>,
     last_bootstrap: Option<SessionBootstrap>,
     status: SessionStatus,
+    /// Incremented after every successful rotation.
+    refresh_epoch: u64,
 }
 
 /// Default implementation of [`IdentityService`] backed by the local
@@ -41,6 +43,7 @@ pub struct DefaultIdentityService {
     storage_cfg: StorageConfig,
     base_url: Option<String>,
     state: Mutex<IdentityState>,
+    rotation_lock: tokio::sync::Mutex<()>,
 }
 
 impl DefaultIdentityService {
@@ -78,7 +81,9 @@ impl DefaultIdentityService {
                 credentials,
                 last_bootstrap: None,
                 status,
+                refresh_epoch: 0,
             }),
+            rotation_lock: tokio::sync::Mutex::new(()),
         })
     }
 }
@@ -152,8 +157,49 @@ impl IdentityService for DefaultIdentityService {
     }
 
     async fn refresh_1psidts(&self) -> Result<(), IdentityError> {
-        // Fase 0 stub – Fase 1 will implement rotation.
-        Ok(())
+        // Single-flight: callers that waited behind a successful refresh reuse it
+        // instead of issuing another `/app` request.
+        let observed_epoch = self.state.lock().refresh_epoch;
+        let _guard = self.rotation_lock.lock().await;
+        let creds = {
+            let state = self.state.lock();
+            if state.refresh_epoch != observed_epoch {
+                return Ok(());
+            }
+            state
+                .credentials
+                .clone()
+                .ok_or(IdentityError::MissingCredentials)?
+        };
+        match rotation::execute_rotation(&self.transport, self.base_url.as_deref(), &creds).await {
+            Ok(result) => {
+                let updated = SessionCredentials {
+                    psid: creds.psid,
+                    psidts: result.psidts,
+                    sapisid: creds.sapisid,
+                    imported_at: rfc3339_now(),
+                };
+                storage::write_cookies(
+                    &self.storage_cfg.data_dir,
+                    &serde_json::to_string(&updated).map_err(|_| IdentityError::Storage)?,
+                )?;
+                let mut state = self.state.lock();
+                state.credentials = Some(updated);
+                state.last_bootstrap = Some(result.bootstrap);
+                state.status = SessionStatus::Valid;
+                state.refresh_epoch += 1;
+                Ok(())
+            }
+            Err(error) => {
+                let mut state = self.state.lock();
+                state.status = if matches!(error, IdentityError::IpFlagged) {
+                    SessionStatus::IpFlagged
+                } else {
+                    SessionStatus::NeedsReauth
+                };
+                Err(error)
+            }
+        }
     }
     fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError> {
         let (cookie_header, sapisid) = {

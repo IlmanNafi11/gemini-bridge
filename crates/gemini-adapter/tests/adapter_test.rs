@@ -161,7 +161,7 @@ async fn llm_adapter_trait_implementation_streams_parsed_events() {
 }
 
 #[tokio::test]
-async fn status_405_maps_to_stale_build_label() {
+async fn repeated_405_is_bounded_and_maps_to_protocol_error() {
     let server = MockServer::start().await;
     let (identity, _dir) = make_identity(&server).await;
     let config = make_config(_dir.path());
@@ -169,6 +169,7 @@ async fn status_405_maps_to_stale_build_label() {
     Mock::given(method("GET"))
         .and(path("/app"))
         .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -177,6 +178,7 @@ async fn status_405_maps_to_stale_build_label() {
             "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
         ))
         .respond_with(ResponseTemplate::new(405))
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -187,7 +189,7 @@ async fn status_405_maps_to_stale_build_label() {
         .err()
         .unwrap();
 
-    assert!(matches!(err, GeminiAdapterError::StaleBuildLabel));
+    assert!(matches!(err, GeminiAdapterError::SchemaMismatch(_)));
 }
 
 #[tokio::test]

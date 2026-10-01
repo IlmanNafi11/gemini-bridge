@@ -2,6 +2,7 @@ pub mod crypto;
 pub mod error;
 pub mod model;
 pub mod parser;
+pub mod rotation;
 pub mod session;
 pub mod storage;
 

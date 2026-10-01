@@ -231,11 +231,41 @@ impl DefaultGeminiAdapter {
         Ok(response.body)
     }
 
+    /// Execute the wire request with one 405 auto-recovery attempt.
+    ///
+    /// Implements the bounded retry contract from SPEC-health-admin §3.3:
+    ///
+    /// 1. Initial attempt.
+    /// 2. On `StaleBuildLabel` (405): refresh bootstrap once via `identity`, retry exactly once.
+    /// 3. If the retry also fails with 405: return a `SchemaMismatch` (maps to 502 Bad Gateway).
+    /// 4. Any other error propagates immediately — 429/IpFlagged never enter this path.
+    async fn execute_wire_with_recovery(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Bytes, GeminiAdapterError> {
+        match self.execute_wire_request(request).await {
+            Ok(body) => Ok(body),
+            Err(GeminiAdapterError::StaleBuildLabel) => {
+                // `execute_wire_request` bootstraps before every upstream call,
+                // so invoking it once more performs exactly one refresh and one retry.
+                match self.execute_wire_request(request).await {
+                    Err(GeminiAdapterError::StaleBuildLabel) => {
+                        Err(GeminiAdapterError::SchemaMismatch(
+                            "upstream returned 405 after build-label refresh".to_owned(),
+                        ))
+                    }
+                    other => other,
+                }
+            }
+            other => other,
+        }
+    }
+
     async fn execute_non_stream(
         &self,
         request: &LlmRequest,
     ) -> Result<Completion, GeminiAdapterError> {
-        let body = self.execute_wire_request(request).await?;
+        let body = self.execute_wire_with_recovery(request).await?;
         let text = parse_non_stream_response(&body, &self.schema)?;
         Ok(Completion {
             text,
@@ -260,7 +290,7 @@ impl GeminiAdapter for DefaultGeminiAdapter {
     ) -> Result<ChunkStream, GeminiAdapterError> {
         // Reuse the same upstream wire call; the full buffered body is parsed
         // frame-by-frame through the prefix-diff engine.
-        let response_bytes = self.execute_wire_request(&req).await?;
+        let response_bytes = self.execute_wire_with_recovery(&req).await?;
         // ChunkStream wraps a StreamChunk type distinct from LlmEvent.
         // We delegate to the shared parse_stream_body and translate events.
         use crate::stream::parse_stream_body;
@@ -303,7 +333,7 @@ impl LlmAdapter for DefaultGeminiAdapter {
 
     async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<Value, LlmError> {
         let body = self
-            .execute_wire_request(&request)
+            .execute_wire_with_recovery(&request)
             .await
             .map_err(map_llm_error)?;
         parse_raw_response(&body).map_err(map_llm_error)
@@ -312,7 +342,7 @@ impl LlmAdapter for DefaultGeminiAdapter {
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
         use crate::stream::parse_stream_body;
         let response_bytes = self
-            .execute_wire_request(&request)
+            .execute_wire_with_recovery(&request)
             .await
             .map_err(map_llm_error)?;
         parse_stream_body(&response_bytes, &self.schema).map_err(map_llm_error)

@@ -652,6 +652,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gemini-bridge-health-admin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gemini-bridge-identity",
+ "http",
+ "serde",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "gemini-bridge-http-server"
 version = "0.1.0"
 dependencies = [
@@ -660,6 +672,7 @@ dependencies = [
  "futures",
  "gemini-bridge-adapter-gemini",
  "gemini-bridge-config",
+ "gemini-bridge-health-admin",
  "gemini-bridge-identity",
  "gemini-bridge-image-gen",
  "gemini-bridge-llm-service",
