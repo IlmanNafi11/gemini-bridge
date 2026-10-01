@@ -200,10 +200,10 @@
   - Files: `crates/code-exec-surface/src/lib.rs`, `crates/code-exec-surface/src/extractor.rs`, `crates/openai-compat/src/metadata.rs`, `tests/gemini_metadata_test.rs`
   - Depends on: Tasks 0.5, 1.1
 
-- [ ] **Task 3.2: Add experimental off-by-default video capability**
+- [x] **Task 3.2: Add experimental off-by-default video capability**
   - Acceptance: Disabled by default; unavailable upstream returns clear 501 not 500; when available, output follows image URL/b64 schema.
-  - Verify: `cargo test -p gemini-bridge-adapter-video` with disabled/unavailable/supported fixture cases.
-  - Files: `crates/video-adapter/src/lib.rs`, `crates/video-adapter/src/handler.rs`, `crates/config/src/model.rs`, `tests/video_test.rs`
+  - Verify: `cargo test -p gemini-bridge-adapter-video` (17 passed); `cargo test --test video_test` (6 passed); `cargo test --workspace` (360 passed, 4 filtered); workspace fmt, clippy, and build pass.
+  - Files: `crates/video-adapter/src/lib.rs`, `crates/video-adapter/src/handler.rs`, `crates/config/src/model.rs`, `crates/http-server/src/handlers/videos.rs`, `tests/video_test.rs`
   - Depends on: P.7, Task 1.4
 
 - [ ] **Task 3.3: Define and implement reload without dropping active streams**
