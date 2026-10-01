@@ -194,7 +194,7 @@
 
 ## Fase 3 — v2.0: metadata, video, plugin evolution, observability
 
-- [ ] **Task 3.1: Surface code execution and citations**
+- [x] **Task 3.1: Surface code execution and citations**
   - Acceptance: Code execution output and grounding citations appear in optional `gemini_metadata` fields and are preserved through stream/non-stream responses without changing standard OpenAI fields.
   - Verify: `cargo test -p gemini-bridge-code-exec`; recorded upstream fixtures cover present/absent/malformed metadata.
   - Files: `crates/code-exec-surface/src/lib.rs`, `crates/code-exec-surface/src/extractor.rs`, `crates/openai-compat/src/metadata.rs`, `tests/gemini_metadata_test.rs`
