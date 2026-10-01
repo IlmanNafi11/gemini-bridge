@@ -162,7 +162,7 @@
   - Files: `crates/conversation-store/Cargo.toml`, `crates/conversation-store/src/lib.rs`, `crates/conversation-store/src/db.rs`, `crates/conversation-store/src/migrations.rs`, `crates/conversation-store/src/models.rs`, `crates/conversation-store/src/error.rs`, `crates/conversation-store/tests/store_test.rs`
   - Depends on: Tasks 0.2, 0.7
 
-- [ ] **Task 2.2: Add continuity, history, branch and regenerate flows**
+- [x] **Task 2.2: Add continuity, history, branch and regenerate flows**
   - Acceptance: Chat with `conversation_id` resumes upstream IDs; history/list endpoints reflect persisted state; branch creates a separate path from selected message; regenerate uses selected prior state; rejected upstream ID replays history and sets `x-gemini-bridge-continuity: degraded`.
   - Verify: `cargo test --test e2e_conversations_test` covers multi-turn, branch isolation, regeneration and degraded fallback.
   - Files: `crates/conversation-store/src/branch.rs`, `crates/http-server/src/handlers/conversations.rs`, `crates/openai-compat/src/chat_models.rs`, `tests/e2e_conversations_test.rs`
