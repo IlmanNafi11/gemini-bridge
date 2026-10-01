@@ -106,7 +106,13 @@ async fn make_state(
         cors_enabled: false,
     };
 
-    (AppState { adapter }, srv_config)
+    (
+        AppState {
+            adapter,
+            upload_service: None,
+        },
+        srv_config,
+    )
 }
 
 /// Spawn an Axum server on the given config, returning quickly.

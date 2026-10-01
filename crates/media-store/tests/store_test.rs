@@ -28,6 +28,7 @@ fn make_meta(mime: &str) -> MediaMetadata {
         created_at: now_unix(),
         expires_at: None,
         prompt: None,
+        file_ref: String::new(),
         model: None,
     }
 }

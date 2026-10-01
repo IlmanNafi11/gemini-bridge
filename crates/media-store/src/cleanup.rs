@@ -44,6 +44,7 @@ mod tests {
             expires_at: Some(200),
             prompt: None,
             model: None,
+            file_ref: String::new(),
         };
         assert!(!is_expired(&meta, 150));
         assert!(!is_expired(&meta, 200)); // exactly at expiration is not expired
@@ -61,6 +62,7 @@ mod tests {
             expires_at: None,
             prompt: None,
             model: None,
+            file_ref: String::new(),
         };
         assert!(!is_expired(&meta, 999999));
     }

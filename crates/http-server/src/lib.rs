@@ -34,6 +34,8 @@ pub struct ServerConfig {
 #[derive(Clone)]
 pub struct AppState {
     pub adapter: Arc<dyn LlmAdapter>,
+    /// File upload/retrieval service; `None` disables `/v1/files` routes.
+    pub upload_service: Option<Arc<dyn gemini_bridge_upload::UploadService>>,
 }
 
 #[derive(Debug, Error)]
@@ -63,6 +65,12 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
             "/v1/models",
             routing::get(handlers::models::list_models_handler),
         )
+        .route(
+            "/v1/files",
+            routing::post(handlers::files::create_file)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/v1/files/{id}", routing::get(handlers::files::get_file))
         .route_layer(middleware::from_fn_with_state(api_key, auth_middleware));
 
     Router::new()

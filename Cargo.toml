@@ -16,6 +16,9 @@ gemini-bridge-identity = { path = "crates/identity" }
 gemini-bridge-http-server = { path = "crates/http-server" }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+tempfile = "3"
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
@@ -26,6 +29,8 @@ gemini-bridge-identity = { path = "crates/identity" }
 gemini-bridge-adapter-gemini = { path = "crates/gemini-adapter" }
 gemini-bridge-openai-compat = { path = "crates/openai-compat" }
 gemini-bridge-http-server = { path = "crates/http-server" }
+gemini-bridge-upload = { path = "crates/upload" }
+gemini-bridge-media-store = { path = "crates/media-store" }
 
 [workspace]
 resolver = "2"
@@ -39,6 +44,7 @@ members = [
     "crates/openai-compat",
     "crates/http-server",
     "crates/media-store",
+    "crates/upload",
 ]
 
 [workspace.package]
@@ -55,7 +61,7 @@ serde = { version = "1", features = ["derive"] }
 bytes = "1"
 http = "1"
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json", "multipart", "stream"] }
 wiremock = "0.6"
 clap = { version = "4", features = ["derive", "env"] }
 aes-gcm = "0.10"
@@ -65,7 +71,7 @@ sha1 = "0.10"
 serde_json = "1"
 futures = "0.3"
 insta = "1"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }
 uuid = { version = "1", features = ["v4"] }

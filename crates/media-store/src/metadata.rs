@@ -22,6 +22,10 @@ pub struct MediaMetadata {
     pub expires_at: Option<i64>,
     /// Optional generation prompt (for image/video records).
     pub prompt: Option<String>,
+    /// Gemini fileRef acquired via push upload, stored for deduplication.
+    /// Empty string if no upstream push upload has been performed yet.
+    #[serde(default)]
+    pub file_ref: String,
     /// Optional model identifier used to generate the media.
     pub model: Option<String>,
 }
