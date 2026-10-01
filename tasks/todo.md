@@ -141,7 +141,7 @@
   - Files: `crates/identity/src/rotation.rs`, `crates/gemini-adapter/src/lib.rs`, `crates/identity/src/session.rs`, `tests/resilience_drills_test.rs`
   - Depends on: Tasks 0.4, 1.1, 1.5
 
-- [ ] **Task 1.7: Integrate redaction, request IDs, audit and rate limiting**
+- [x] **Task 1.7: Integrate redaction, request IDs, audit and rate limiting**
   - Acceptance: Request IDs propagate through logs/responses; known secret patterns are redacted; rate limiting returns mapped 429; middleware does not mutate frozen request payloads.
   - Verify: `cargo test -p gemini-bridge-middleware`; capture emitted logs and assert secrets absent; verify limit boundary.
   - Files: `crates/middleware/src/lib.rs`, `crates/middleware/src/redact.rs`, `crates/middleware/src/rate_limit.rs`, `crates/middleware/src/audit.rs`, `crates/http-server/src/middleware.rs`
