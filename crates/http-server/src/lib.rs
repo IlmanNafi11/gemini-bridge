@@ -14,10 +14,6 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
-use serde_json::json;
-use thiserror::Error;
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
-
 use gemini_bridge_conversation_store::ConversationStore;
 use gemini_bridge_health_admin::{DefaultHealthAdminService, HealthAdminService};
 use gemini_bridge_llm_service::LlmAdapter;
@@ -25,6 +21,10 @@ use gemini_bridge_middleware::{
     AdmissionDecision, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
 };
 use gemini_bridge_openai_compat::OpenAiErrorResponse;
+use gemini_bridge_tool_calling::{DefaultToolEngine, ToolEngine};
+use serde_json::json;
+use thiserror::Error;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
@@ -58,6 +58,8 @@ pub struct AppState {
     pub health_admin: Arc<dyn HealthAdminService>,
     /// Conversation persistence; `None` disables `/v1/conversations` routes.
     pub conversation_store: Option<Arc<dyn ConversationStore>>,
+    /// Tool-calling translation, validation, and continuation engine.
+    pub tool_engine: Arc<dyn ToolEngine>,
 }
 
 #[derive(Debug, Error)]
@@ -260,4 +262,9 @@ pub fn build_health_admin(
     identity: Option<Arc<dyn gemini_bridge_identity::IdentityService>>,
 ) -> Arc<dyn HealthAdminService> {
     Arc::new(DefaultHealthAdminService::new(identity))
+}
+
+/// Create the production tool-calling engine.
+pub fn build_tool_engine() -> Arc<dyn ToolEngine> {
+    Arc::new(DefaultToolEngine)
 }

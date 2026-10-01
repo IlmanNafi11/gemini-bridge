@@ -27,6 +27,7 @@ gemini-bridge-image-gen = { path = "../image-gen" }
 gemini-bridge-health-admin = { path = "../health-admin" }
 gemini-bridge-middleware = { path = "../middleware" }
 gemini-bridge-conversation-store = { path = "../conversation-store" }
+gemini-bridge-tool-calling = { path = "../tool-calling" }
 
 [dev-dependencies]
 reqwest = { workspace = true }

@@ -35,6 +35,7 @@ gemini-bridge-image-gen = { path = "crates/image-gen" }
 gemini-bridge-llm-service = { path = "crates/llm-service" }
 gemini-bridge-middleware = { path = "crates/middleware" }
 gemini-bridge-conversation-store = { path = "crates/conversation-store" }
+gemini-bridge-tool-calling = { path = "crates/tool-calling" }
 gemini-bridge-health-admin = { path = "crates/health-admin" }
 base64 = "0.22"
 futures = { workspace = true }
@@ -52,7 +53,7 @@ members = [
     "crates/llm-service",
     "crates/gemini-adapter",
     "crates/openai-compat",
-    "crates/http-server",
+    "crates/tool-calling",
     "crates/media-store",
     "crates/upload",
     "crates/image-gen",

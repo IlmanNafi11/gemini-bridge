@@ -1,0 +1,14 @@
+[package]
+name = "gemini-bridge-tool-calling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gemini-bridge-llm-service = { path = "../llm-service" }
+gemini-bridge-openai-compat = { path = "../openai-compat" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+uuid = { workspace = true }

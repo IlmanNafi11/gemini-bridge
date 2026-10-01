@@ -5,6 +5,9 @@
 //! any provider-specific crate.
 
 pub mod models;
+pub mod tools;
+
+pub use tools::{ToolCallFunction, ToolCallObject};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,6 +87,15 @@ pub struct ChatCompletionRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: Option<ChatMessageContent>,
+    /// Present on `role: "tool"` messages to pair results with a prior call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Present on `role: "tool"` messages: the function name that produced the result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Present on assistant messages when tool calls were invoked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallObject>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +142,11 @@ pub struct ChatChoice {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AssistantMessage {
-    pub role: &'static str,
-    pub content: String,
+    pub role: &'static str, // always "assistant"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallObject>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,7 +302,8 @@ mod tests {
                 index: 0,
                 message: AssistantMessage {
                     role: "assistant",
-                    content: "Hello!".to_string(),
+                    content: Some("Hello!".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: "stop".to_string(),
             }],
@@ -306,5 +322,55 @@ mod tests {
         assert_eq!(json["choices"][0]["finish_reason"], "stop");
         // gemini_metadata should be absent (skip_serializing_if)
         assert!(!json.as_object().unwrap().contains_key("gemini_metadata"));
+    }
+
+    #[test]
+    fn chat_completion_response_serializes_tool_calls() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-tool".to_string(),
+            object: "chat.completion",
+            created: 1_700_000_000,
+            model: "gemini-web-flash".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: AssistantMessage {
+                    role: "assistant",
+                    content: None,
+                    tool_calls: Some(vec![ToolCallObject {
+                        id: "call_123".to_string(),
+                        call_type: "function".to_string(),
+                        function: ToolCallFunction {
+                            name: "get_weather".to_string(),
+                            arguments: r#"{"location":"Paris"}"#.to_string(),
+                        },
+                    }]),
+                },
+                finish_reason: "tool_calls".to_string(),
+            }],
+            usage: None,
+            gemini_metadata: None,
+        };
+
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["choices"][0]["finish_reason"], "tool_calls");
+        assert!(json["choices"][0]["message"]["content"].is_null());
+        let tool_call = &json["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tool_call["id"], "call_123");
+        assert_eq!(tool_call["type"], "function");
+        assert_eq!(tool_call["function"]["name"], "get_weather");
+        assert_eq!(
+            tool_call["function"]["arguments"],
+            r#"{"location":"Paris"}"#
+        );
+    }
+
+    #[test]
+    fn chat_message_with_tool_call_id_roundtrip() {
+        let raw = r#"{"role":"tool","content":"{\"temp\":22}","tool_call_id":"call_123","name":"get_weather"}"#;
+        let msg: ChatMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
+        assert_eq!(msg.name.as_deref(), Some("get_weather"));
+        assert!(matches!(&msg.content, Some(ChatMessageContent::Text(t)) if t == r#"{"temp":22}"#));
     }
 }

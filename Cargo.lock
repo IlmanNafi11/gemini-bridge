@@ -629,6 +629,7 @@ dependencies = [
  "gemini-bridge-media-store",
  "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
+ "gemini-bridge-tool-calling",
  "gemini-bridge-upload",
  "parking_lot",
  "reqwest",
@@ -716,6 +717,7 @@ dependencies = [
  "gemini-bridge-llm-service",
  "gemini-bridge-middleware",
  "gemini-bridge-openai-compat",
+ "gemini-bridge-tool-calling",
  "gemini-bridge-transport",
  "gemini-bridge-upload",
  "reqwest",
@@ -832,6 +834,19 @@ dependencies = [
  "async-trait",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "gemini-bridge-tool-calling"
+version = "0.1.0"
+dependencies = [
+ "gemini-bridge-llm-service",
+ "gemini-bridge-openai-compat",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

@@ -359,10 +359,21 @@ fn normalized_prompt(request: &LlmRequest) -> Result<String, GeminiAdapterError>
     let mut lines = Vec::new();
     for message in request.messages.iter() {
         for part in message.parts.iter() {
-            if let ContentPart::Text(text) = part
-                && message.role == Role::User
-            {
-                lines.push(text.as_str());
+            match part {
+                ContentPart::Text(text)
+                    if message.role == Role::User || message.role == Role::Tool =>
+                {
+                    lines.push(text.as_str());
+                }
+                ContentPart::ToolResult(result)
+                    if message
+                        .parts
+                        .iter()
+                        .all(|p| !matches!(p, ContentPart::Text(_))) =>
+                {
+                    lines.push(result.content.as_str());
+                }
+                _ => {}
             }
         }
     }
