@@ -202,3 +202,45 @@ fn redaction_filter_redacts_auth_headers_and_gemini_cookies() {
     assert!(redacted.contains("user=normal"));
     assert!(redacted.contains("***REDACTED***"));
 }
+
+#[test]
+fn captured_tracing_output_contains_no_sentinel_secrets() {
+    use std::sync::Mutex;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+    impl<'a> MakeWriter<'a> for BufferWriter {
+        type Writer = BufferHandle;
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferHandle(self.0.clone())
+        }
+    }
+    struct BufferHandle(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for BufferHandle {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufferWriter(output.clone()))
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let raw_diagnostic = "Diagnostic log: Bearer secret-sentinel-key; __Secure-1PSID=cookie-sentinel; api_key=another-sentinel";
+        let sanitized = RedactionFilter::redact_str(raw_diagnostic);
+        tracing::info!(message = %sanitized, "audit emission");
+    });
+
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("secret-sentinel-key"));
+    assert!(!logs.contains("cookie-sentinel"));
+    assert!(!logs.contains("another-sentinel"));
+    assert!(logs.contains("***REDACTED***"));
+}

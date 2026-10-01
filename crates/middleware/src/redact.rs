@@ -13,9 +13,22 @@ static COOKIE_PATTERN: LazyLock<Regex> =
 static BEARER_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(Bearer\s+)([A-Za-z0-9_\-\.\~]+)").unwrap());
 
-// Regex for SAPISIDHASH headers: `SAPISIDHASH <hash>`
+// Regex for `SAPISIDHASH <hash>` authorization values.
 static SAPISIDHASH_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(SAPISIDHASH\s+)([A-Za-z0-9_\-\.\~]+)").unwrap());
+
+// Header/config value assignments: `api_key=...`, `password: ...`, `secret: ...`
+// Does NOT handle Proxy-Authorization (handled separately with its scheme).
+static NAMED_SECRET_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(\b(?:api_key|api-key|apikey|token|password|secret|cookie)\b\s*[:=]\s*)([^\s;,]+)",
+    )
+    .unwrap()
+});
+
+// Proxy-Authorization: [scheme] credential — redacts full header value.
+static PROXY_AUTH_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(Proxy-Authorization\s*:\s*)([^\r\n;]+)").unwrap());
 
 // Case-insensitive list of key names that contain secrets in JSON payloads.
 const SENSITIVE_KEYS: &[&str] = &[
@@ -54,7 +67,16 @@ impl RedactionFilter {
                 format!("{}{}", &caps[1], REDACTED_MARKER)
             });
 
-        after_sapisidhash.into_owned()
+        let after_proxy_auth = PROXY_AUTH_PATTERN
+            .replace_all(&after_sapisidhash, |caps: &regex::Captures| {
+                format!("{}{}", &caps[1], REDACTED_MARKER)
+            });
+
+        NAMED_SECRET_PATTERN
+            .replace_all(&after_proxy_auth, |caps: &regex::Captures| {
+                format!("{}{}", &caps[1], REDACTED_MARKER)
+            })
+            .into_owned()
     }
 
     /// Recursively redacts sensitive keys in JSON structures.

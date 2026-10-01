@@ -127,3 +127,16 @@ fn idle_bucket_removal_preserves_recently_used_buckets() {
     ));
     assert_eq!(limiter.try_acquire("idle", start), AdmissionDecision::Allow);
 }
+
+#[test]
+fn redacts_proxy_authorization_and_sapisidhash_variants() {
+    let input = "Proxy-Authorization: Basic sentinel-user-pass; SAPISIDHASH 123456_sentinel; api_key=topsecret";
+    let output = RedactionFilter::redact_str(input);
+
+    assert!(!output.contains("sentinel-user-pass"));
+    assert!(!output.contains("123456_sentinel"));
+    assert!(!output.contains("topsecret"));
+    assert!(output.contains("Proxy-Authorization: ***REDACTED***"));
+    assert!(output.contains("SAPISIDHASH ***REDACTED***"));
+    assert!(output.contains("api_key=***REDACTED***"));
+}
