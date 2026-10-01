@@ -61,6 +61,7 @@ async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHan
         adapter: Arc::new(NoopAdapter),
         upload_service: None,
         image_service: None,
+        video_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(None),
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),

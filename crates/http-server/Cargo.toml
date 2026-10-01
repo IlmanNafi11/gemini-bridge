@@ -30,6 +30,7 @@ gemini-bridge-conversation-store = { path = "../conversation-store" }
 gemini-bridge-tool-calling = { path = "../tool-calling" }
 gemini-bridge-gallery = { path = "../gallery" }
 gemini-bridge-code-exec = { path = "../code-exec-surface" }
+gemini-bridge-adapter-video = { path = "../video-adapter" }
 
 [dev-dependencies]
 reqwest = { workspace = true }

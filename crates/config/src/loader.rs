@@ -93,6 +93,7 @@ fn defaults_figment() -> Figment {
         server: default_server,
         storage: default_storage,
         transport: default_transport,
+        video: crate::model::VideoConfig::default(),
     };
 
     // Serialize to TOML and inject as a Toml string provider

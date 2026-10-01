@@ -91,6 +91,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             proxy_url: None,
             timeout_secs: 10,
         },
+        video: Default::default(),
     });
 
     let identity =
@@ -123,6 +124,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             adapter,
             upload_service: Some(upload_service),
             image_service: None,
+            video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(None),
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),

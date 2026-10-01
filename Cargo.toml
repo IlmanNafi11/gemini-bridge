@@ -39,6 +39,7 @@ gemini-bridge-tool-calling = { path = "crates/tool-calling" }
 gemini-bridge-health-admin = { path = "crates/health-admin" }
 gemini-bridge-gallery = { path = "crates/gallery" }
 gemini-bridge-code-exec = { path = "crates/code-exec-surface" }
+gemini-bridge-adapter-video = { path = "crates/video-adapter" }
 base64 = "0.22"
 futures = { workspace = true }
 parking_lot = { workspace = true }
@@ -64,6 +65,7 @@ members = [
     "crates/conversation-store",
     "crates/gallery",
     "crates/code-exec-surface",
+    "crates/video-adapter",
 ]
 
 [workspace.package]

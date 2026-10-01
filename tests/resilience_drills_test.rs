@@ -38,6 +38,7 @@ fn bridge_config(tmp: &std::path::Path) -> BridgeConfig {
             proxy_url: None,
             timeout_secs: 5,
         },
+        video: Default::default(),
     }
 }
 
@@ -87,6 +88,7 @@ async fn build_test_app(
         adapter: adapter.clone() as Arc<dyn LlmAdapter>,
         upload_service: None,
         image_service: None,
+        video_service: None,
         health_admin,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
@@ -356,6 +358,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
         adapter: adapter.clone() as Arc<dyn LlmAdapter>,
         upload_service: None,
         image_service: None,
+        video_service: None,
         health_admin,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),

@@ -619,6 +619,7 @@ dependencies = [
  "clap",
  "futures",
  "gemini-bridge-adapter-gemini",
+ "gemini-bridge-adapter-video",
  "gemini-bridge-code-exec",
  "gemini-bridge-config",
  "gemini-bridge-conversation-store",
@@ -662,6 +663,31 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "gemini-bridge-adapter-video"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "gemini-bridge-config",
+ "gemini-bridge-llm-service",
+ "gemini-bridge-media-store",
+ "http",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
  "url",
  "wiremock",
 ]
@@ -739,6 +765,7 @@ dependencies = [
  "bytes",
  "futures",
  "gemini-bridge-adapter-gemini",
+ "gemini-bridge-adapter-video",
  "gemini-bridge-code-exec",
  "gemini-bridge-config",
  "gemini-bridge-conversation-store",

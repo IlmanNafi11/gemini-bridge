@@ -35,6 +35,7 @@ fn make_config(temp_dir: &std::path::Path) -> Arc<BridgeConfig> {
             proxy_url: None,
             timeout_secs: 5,
         },
+        video: Default::default(),
     })
 }
 

@@ -144,6 +144,7 @@ fn build_test_router(
         adapter,
         upload_service: None,
         image_service: None,
+        video_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(Some(identity)),
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),

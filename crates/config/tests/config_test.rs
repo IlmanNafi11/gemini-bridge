@@ -19,6 +19,7 @@ fn empty_toml_applies_all_defaults() {
     assert_eq!(config.transport.tls_profile, "chrome");
     assert_eq!(config.transport.proxy_url, None);
     assert_eq!(config.transport.timeout_secs, 30);
+    assert!(!config.video.enabled);
 }
 
 #[test]

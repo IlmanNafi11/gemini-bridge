@@ -279,6 +279,7 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
             proxy_url: None,
             timeout_secs: 5,
         },
+        video: Default::default(),
     };
     let service = DefaultIdentityService::with_base_url(&config, Some(server.uri())).unwrap();
     service
@@ -316,6 +317,7 @@ async fn apply_auth_headers_sets_expected_headers() {
             proxy_url: None,
             timeout_secs: 5,
         },
+        video: Default::default(),
     };
     let service = DefaultIdentityService::new(&config).unwrap();
     let mut headers = HeaderMap::new();

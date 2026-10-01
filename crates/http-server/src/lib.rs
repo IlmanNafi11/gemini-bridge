@@ -61,6 +61,8 @@ pub struct AppState {
     pub upload_service: Option<Arc<dyn gemini_bridge_upload::UploadService>>,
     /// Image generation/retrieval service; `None` disables `/v1/images` routes.
     pub image_service: Option<Arc<dyn gemini_bridge_image_gen::ImageGenService>>,
+    /// Video generation/retrieval service; `None` returns explicit HTTP 501.
+    pub video_service: Option<Arc<dyn gemini_bridge_adapter_video::VideoService>>,
     /// Process and session operations used by health/admin routes.
     pub health_admin: Arc<dyn HealthAdminService>,
     /// Conversation persistence; `None` disables `/v1/conversations` routes.
@@ -109,6 +111,11 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
             routing::post(handlers::images::generate_image),
         )
         .route("/v1/images/{id}", routing::get(handlers::images::get_image))
+        .route(
+            "/v1/videos/generations",
+            routing::post(handlers::videos::generate_video),
+        )
+        .route("/v1/videos/{id}", routing::get(handlers::videos::get_video))
         .route(
             "/v1/conversations",
             routing::get(handlers::conversations::list_conversations),

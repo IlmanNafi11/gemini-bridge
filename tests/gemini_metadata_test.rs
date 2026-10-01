@@ -68,6 +68,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             proxy_url: None,
             timeout_secs: 10,
         },
+        video: Default::default(),
     });
 
     let identity = Arc::new(
@@ -93,6 +94,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             adapter,
             upload_service: None,
             image_service: None,
+            video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(Some(identity.clone())),
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),

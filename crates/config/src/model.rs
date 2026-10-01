@@ -93,9 +93,18 @@ pub struct TransportConfig {
     pub timeout_secs: u64,
 }
 
+/// Video generation configuration (experimental, off-by-default).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VideoConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeConfig {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub transport: TransportConfig,
+    #[serde(default)]
+    pub video: VideoConfig,
 }

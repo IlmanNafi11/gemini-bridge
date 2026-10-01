@@ -75,6 +75,7 @@ async fn test_server() -> (
         adapter: adapter.clone(),
         upload_service: None,
         image_service: None,
+        video_service: None,
         health_admin: Arc::new(DefaultHealthAdminService::new(None)),
         conversation_store: Some(store.clone()),
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
