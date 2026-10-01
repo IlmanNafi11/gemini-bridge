@@ -174,7 +174,7 @@
   - Files: `crates/tool-calling/src/lib.rs`, `crates/tool-calling/src/injector.rs`, `crates/tool-calling/src/parser.rs`, `crates/openai-compat/src/tools.rs`, `tests/tool_calling_test.rs`
   - Depends on: Tasks 0.7, 1.1
 
-- [ ] **Task 2.4: Deliver gallery JSON and embedded HTML path**
+- [x] **Task 2.4: Deliver gallery JSON and embedded HTML path**
   - Acceptance: `/gallery` JSON and `?format=html` show cached items; date/model/prompt filters work; delete/download actions update/use media store; HTML has no external runtime asset dependency.
   - Verify: `cargo test -p gemini-bridge-gallery`; run service and visually check rendered gallery plus filtering/deletion.
   - Files: `crates/gallery/src/lib.rs`, `crates/gallery/src/handlers.rs`, `crates/gallery/static/gallery.html`, `crates/http-server/src/handlers/gallery.rs`, `tests/gallery_test.rs`
