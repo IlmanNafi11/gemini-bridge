@@ -123,7 +123,7 @@
   - Files: `crates/upload/src/lib.rs`, `crates/upload/src/push_client.rs`, `crates/upload/src/ssrf.rs`, `crates/http-server/src/handlers/files.rs`, `tests/e2e_files_test.rs`
   - Depends on: Tasks 0.3, 0.4, 1.2
 
-- [ ] **Task 1.4: Deliver image-generation and retrieval path**
+- [x] **Task 1.4: Deliver image-generation and retrieval path**
   - Acceptance: `POST /v1/images/generations` accepts required inputs and optional references; extracts generated image URLs; caches image bytes and metadata; returns proxy URL or b64; `GET /v1/images/{id}` returns valid cached image.
   - Verify: `cargo test -p gemini-bridge-image-gen`; live acceptance: 5 distinct prompts and 2 with references produce decodable non-empty images.
   - Files: `crates/image-gen/src/lib.rs`, `crates/image-gen/src/extractor.rs`, `crates/http-server/src/handlers/images.rs`, `crates/media-store/src/metadata.rs`, `tests/e2e_image_test.rs`
