@@ -65,6 +65,7 @@ async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHan
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: Some(gallery_service),
+        media_purge: None,
     };
     let config = ServerConfig {
         bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),

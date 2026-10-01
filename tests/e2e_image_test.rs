@@ -145,6 +145,7 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
+            media_purge: None,
         },
     );
     let server = spawn_server(router, port).await;
@@ -227,6 +228,7 @@ async fn b64_response_decodes_to_generated_image_bytes() {
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
+            media_purge: None,
         },
     );
     let server = spawn_server(router, port).await;
@@ -286,6 +288,7 @@ async fn missing_image_id_returns_not_found() {
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
+            media_purge: None,
         },
     );
     let server = spawn_server(router, port).await;

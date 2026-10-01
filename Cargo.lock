@@ -711,6 +711,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "gemini-bridge-identity",
+ "gemini-bridge-media-store",
  "http",
  "serde",
  "thiserror",

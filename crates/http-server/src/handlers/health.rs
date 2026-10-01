@@ -64,6 +64,29 @@ pub async fn reauth(State(state): State<AppState>, body: Bytes) -> Response {
     }
 }
 
+/// `POST /admin/purge`: remove expired cached media and metadata.
+pub async fn purge_media(State(state): State<AppState>) -> Response {
+    let Some(service) = &state.media_purge else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    match service.purge_expired().await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(HealthAdminError::PurgeFailed(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": {
+                    "message": message,
+                    "type": "server_error",
+                    "code": "media_purge_failed"
+                }
+            })),
+        )
+            .into_response(),
+        Err(error) => reauth_error(error),
+    }
+}
+
 fn reauth_error(error: HealthAdminError) -> Response {
     let (status, message, code) = match error {
         HealthAdminError::ReauthFailed(message) => {
@@ -77,6 +100,11 @@ fn reauth_error(error: HealthAdminError) -> Response {
         HealthAdminError::ReloadFailed(message) => {
             (StatusCode::NOT_IMPLEMENTED, message, "reload_not_supported")
         }
+        HealthAdminError::PurgeFailed(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+            "media_purge_failed",
+        ),
     };
 
     (

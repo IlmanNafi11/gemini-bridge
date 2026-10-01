@@ -65,6 +65,9 @@ pub enum HealthAdminError {
     #[error("Reload failed: {0}")]
     ReloadFailed(String),
 
+    #[error("Purge failed: {0}")]
+    PurgeFailed(String),
+
     #[error("Unauthorized")]
     Unauthorized,
 }

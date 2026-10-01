@@ -79,6 +79,7 @@ async fn test_server() -> (
         conversation_store: Some(store.clone()),
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
+        media_purge: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

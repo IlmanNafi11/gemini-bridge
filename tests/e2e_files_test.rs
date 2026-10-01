@@ -127,6 +127,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
+            media_purge: None,
         },
     );
 

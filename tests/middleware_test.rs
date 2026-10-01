@@ -127,6 +127,7 @@ fn build_test_router_with_rate_limit(
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
+        media_purge: None,
     };
     (build_router(cfg, state), port)
 }

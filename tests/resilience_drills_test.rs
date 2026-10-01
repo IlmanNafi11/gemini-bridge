@@ -91,6 +91,7 @@ async fn build_test_app(
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
+        media_purge: None,
     };
 
     let (listener, port) = bind_listener().await;
@@ -359,6 +360,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
+        media_purge: None,
     };
 
     let (listener, port) = bind_listener().await;

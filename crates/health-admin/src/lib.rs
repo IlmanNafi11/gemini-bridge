@@ -1,5 +1,6 @@
 //! Health, readiness, admin status, and session re-authentication service.
 
+pub mod purge;
 pub mod readiness;
 
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use gemini_bridge_identity::{IdentityService, SessionStatus};
 
+pub use purge::{DefaultMediaPurgeAdminService, MediaPurgeAdminService, PurgeResult};
 pub use readiness::{
     AdminStatusResponse, HealthAdminError, HealthResponse, ReadinessResponse, ReauthResponse,
 };

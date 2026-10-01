@@ -15,7 +15,9 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
 use gemini_bridge_conversation_store::ConversationStore;
-use gemini_bridge_health_admin::{DefaultHealthAdminService, HealthAdminService};
+use gemini_bridge_health_admin::{
+    DefaultHealthAdminService, HealthAdminService, MediaPurgeAdminService,
+};
 use gemini_bridge_llm_service::LlmAdapter;
 use gemini_bridge_middleware::{
     AdmissionDecision, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
@@ -67,6 +69,8 @@ pub struct AppState {
     pub tool_engine: Arc<dyn ToolEngine>,
     /// Gallery listing, download, and deletion service; `None` disables `/gallery` routes.
     pub gallery_service: Option<Arc<dyn gemini_bridge_gallery::GalleryService>>,
+    /// Expired-media purge administration; `None` disables `POST /admin/purge`.
+    pub media_purge: Option<Arc<dyn MediaPurgeAdminService>>,
 }
 
 #[derive(Debug, Error)]
@@ -150,13 +154,17 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         .route("/healthz", routing::get(handlers::health::healthz))
         .route("/readyz", routing::get(handlers::health::readyz));
 
-    let admin_routes = Router::new()
+    let mut admin_routes = Router::new()
         .route("/admin/status", routing::get(handlers::admin::admin_status))
-        .route("/admin/reauth", routing::post(handlers::admin::reauth))
-        .route_layer(middleware::from_fn_with_state(
-            api_key,
-            admin_auth_middleware,
-        ));
+        .route("/admin/reauth", routing::post(handlers::admin::reauth));
+    if state.media_purge.is_some() {
+        admin_routes =
+            admin_routes.route("/admin/purge", routing::post(handlers::admin::purge_media));
+    }
+    let admin_routes = admin_routes.route_layer(middleware::from_fn_with_state(
+        api_key,
+        admin_auth_middleware,
+    ));
 
     Router::new()
         .merge(public_routes)

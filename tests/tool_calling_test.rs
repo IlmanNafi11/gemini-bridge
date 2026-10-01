@@ -74,6 +74,7 @@ async fn start_tool_server() -> (
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine) as Arc<dyn ToolEngine>,
         gallery_service: None,
+        media_purge: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -241,6 +242,7 @@ async fn http_chat_invalid_tool_output_falls_back_to_text_with_warning_header() 
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine) as Arc<dyn ToolEngine>,
         gallery_service: None,
+        media_purge: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
