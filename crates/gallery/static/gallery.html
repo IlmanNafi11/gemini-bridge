@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemini Bridge Gallery</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1.5rem; }
+  h1 { margin-bottom: 1rem; font-size: 1.4rem; letter-spacing: .02em; }
+
+  /* Filters */
+  #filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
+  #filters input, #filters button {
+    background: #1e1e1e; border: 1px solid #333; color: #eee;
+    padding: .4rem .8rem; border-radius: 4px; font-size: .9rem;
+  }
+  #filters input::placeholder { color: #666; }
+  #filters button { cursor: pointer; background: #2a2a2a; }
+  #filters button:hover { background: #333; }
+
+  /* Gallery grid */
+  #gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+  .item {
+    background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 6px; overflow: hidden;
+  }
+  .item img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; background: #111; }
+  .item .meta { padding: .6rem; font-size: .8rem; }
+  .item .prompt { color: #bbb; margin-bottom: .25rem; word-break: break-word; }
+  .item .info { color: #666; font-size: .75rem; }
+  .item .actions { display: flex; gap: .5rem; padding: .5rem .6rem; border-top: 1px solid #2a2a2a; }
+  .item .actions a, .item .actions button {
+    flex: 1; text-align: center; padding: .35rem 0; border-radius: 4px;
+    border: 1px solid #333; background: #2a2a2a; color: #eee;
+    font-size: .78rem; cursor: pointer; text-decoration: none;
+  }
+  .item .actions button:hover { background: #3a1010; border-color: #a33; color: #faa; }
+
+  /* Pagination */
+  #pagination { display: flex; justify-content: center; gap: .5rem; margin-top: 1.5rem; }
+  #pagination button {
+    background: #1e1e1e; border: 1px solid #333; color: #eee;
+    padding: .4rem .9rem; border-radius: 4px; cursor: pointer;
+  }
+  #pagination button:disabled { opacity: .35; cursor: default; }
+  #pagination .page-info { align-self: center; color: #888; font-size: .85rem; }
+  #status { color: #888; margin-top: 1rem; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Gallery</h1>
+
+<div id="filters">
+  <input id="f-prompt" type="text" placeholder="Prompt contains…" />
+  <input id="f-model" type="text" placeholder="Model (exact)" />
+  <input id="f-from" type="number" placeholder="Date from (unix)" />
+  <input id="f-to" type="number" placeholder="Date to (unix)" />
+  <button id="btn-filter">Filter</button>
+  <button id="btn-clear">Clear</button>
+</div>
+
+<div id="gallery"></div>
+<div id="pagination"></div>
+<div id="status"></div>
+
+<script>
+(function () {
+  'use strict';
+  var PAGE_LIMIT = 24;
+  var state = { offset: 0, total: 0, prompt: '', model: '', dateFrom: '', dateTo: '' };
+
+  function qs(s) { return document.querySelector(s); }
+
+  function buildUrl() {
+    var url = '/gallery?limit=' + encodeURIComponent(PAGE_LIMIT) +
+              '&offset=' + encodeURIComponent(state.offset);
+    if (state.prompt)   url += '&prompt='    + encodeURIComponent(state.prompt);
+    if (state.model)    url += '&model='     + encodeURIComponent(state.model);
+    if (state.dateFrom) url += '&date_from=' + encodeURIComponent(state.dateFrom);
+    if (state.dateTo)   url += '&date_to='   + encodeURIComponent(state.dateTo);
+    return url;
+  }
+
+  function load() {
+    fetch(buildUrl())
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        state.total = data.total || 0;
+        renderGallery(data.data || []);
+        renderPagination();
+        qs('#status').textContent = data.total + ' item(s) found.';
+      })
+      .catch(function(err){
+        qs('#status').textContent = 'Error loading gallery: ' + err.message;
+      });
+  }
+
+  function escapeText(s) {
+    var d = document.createElement('div');
+    d.appendChild(document.createTextNode(s));
+    return d.innerHTML;
+  }
+
+  function formatDate(unix) {
+    return new Date(unix * 1000).toLocaleString();
+  }
+
+  function renderGallery(items) {
+    var gallery = qs('#gallery');
+    gallery.innerHTML = '';
+    if (!items.length) {
+      gallery.innerHTML = '<p style="color:#666;grid-column:1/-1">No items match your filters.</p>';
+      return;
+    }
+    items.forEach(function(item) {
+      var downloadUrl = '/gallery/' + encodeURIComponent(item.id) + '/download';
+      var div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML =
+        '<img src="' + downloadUrl + '" alt="" loading="lazy">' +
+        '<div class="meta">' +
+          '<div class="prompt">' + escapeText(item.prompt || '(no prompt)') + '</div>' +
+          '<div class="info">' +
+            escapeText(item.model || '') +
+            (item.model ? ' &middot; ' : '') +
+            escapeText(formatDate(item.created_at)) +
+          '</div>' +
+        '</div>' +
+        '<div class="actions">' +
+          '<a href="' + downloadUrl + '" download>Download</a>' +
+          '<button data-id="' + escapeText(item.id) + '">Delete</button>' +
+        '</div>';
+      div.querySelector('button').addEventListener('click', function() {
+        deleteItem(item.id);
+      });
+      gallery.appendChild(div);
+    });
+  }
+
+  function renderPagination() {
+    var pg = qs('#pagination');
+    pg.innerHTML = '';
+    var pages = Math.ceil(state.total / PAGE_LIMIT) || 1;
+    var current = Math.floor(state.offset / PAGE_LIMIT);
+
+    var prev = document.createElement('button');
+    prev.textContent = '← Prev';
+    prev.disabled = current === 0;
+    prev.addEventListener('click', function() {
+      state.offset = Math.max(0, state.offset - PAGE_LIMIT);
+      load();
+    });
+
+    var info = document.createElement('span');
+    info.className = 'page-info';
+    info.textContent = 'Page ' + (current + 1) + ' / ' + pages;
+
+    var next = document.createElement('button');
+    next.textContent = 'Next →';
+    next.disabled = state.offset + PAGE_LIMIT >= state.total;
+    next.addEventListener('click', function() {
+      state.offset += PAGE_LIMIT;
+      load();
+    });
+
+    pg.appendChild(prev);
+    pg.appendChild(info);
+    pg.appendChild(next);
+  }
+
+  function deleteItem(id) {
+    fetch('/gallery/' + encodeURIComponent(id), { method: 'DELETE' })
+      .then(function(r) {
+        if (r.ok) {
+          load();
+        } else {
+          qs('#status').textContent = 'Delete failed (status ' + r.status + ').';
+        }
+      })
+      .catch(function(err) {
+        qs('#status').textContent = 'Delete error: ' + err.message;
+      });
+  }
+
+  qs('#btn-filter').addEventListener('click', function() {
+    state.offset = 0;
+    state.prompt   = qs('#f-prompt').value;
+    state.model    = qs('#f-model').value;
+    state.dateFrom = qs('#f-from').value;
+    state.dateTo   = qs('#f-to').value;
+    load();
+  });
+
+  qs('#btn-clear').addEventListener('click', function() {
+    qs('#f-prompt').value = '';
+    qs('#f-model').value  = '';
+    qs('#f-from').value   = '';
+    qs('#f-to').value     = '';
+    state.offset = 0;
+    state.prompt = state.model = state.dateFrom = state.dateTo = '';
+    load();
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

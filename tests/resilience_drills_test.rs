@@ -90,6 +90,7 @@ async fn build_test_app(
         health_admin,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
+        gallery_service: None,
     };
 
     let (listener, port) = bind_listener().await;
@@ -357,6 +358,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
         health_admin,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
+        gallery_service: None,
     };
 
     let (listener, port) = bind_listener().await;

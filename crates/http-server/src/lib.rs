@@ -34,6 +34,11 @@ struct PublicMiddlewareState {
     rate_limiter: Option<Arc<TokenBucketLimiter>>,
 }
 
+#[derive(Clone)]
+struct DeleteAuthCheckState {
+    is_localhost: bool,
+    has_api_key: bool,
+}
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Server configuration at the HTTP layer.
@@ -60,6 +65,8 @@ pub struct AppState {
     pub conversation_store: Option<Arc<dyn ConversationStore>>,
     /// Tool-calling translation, validation, and continuation engine.
     pub tool_engine: Arc<dyn ToolEngine>,
+    /// Gallery listing, download, and deletion service; `None` disables `/gallery` routes.
+    pub gallery_service: Option<Arc<dyn gemini_bridge_gallery::GalleryService>>,
 }
 
 #[derive(Debug, Error)]
@@ -113,6 +120,23 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         .route(
             "/v1/conversations/{id}/regenerate",
             routing::post(handlers::conversations::regenerate_conversation),
+        )
+        .route("/gallery", routing::get(handlers::gallery::list_gallery))
+        .route(
+            "/gallery/{id}/download",
+            routing::get(handlers::gallery::download_gallery_item),
+        )
+        .route(
+            "/gallery/{id}",
+            routing::delete(handlers::gallery::delete_gallery_item).layer(
+                middleware::from_fn_with_state(
+                    DeleteAuthCheckState {
+                        is_localhost: config.bind_addr.ip().is_loopback(),
+                        has_api_key: config.api_key.is_some(),
+                    },
+                    gallery_delete_auth_middleware,
+                ),
+            ),
         )
         .route_layer(middleware::from_fn_with_state(
             PublicMiddlewareState {
@@ -193,7 +217,22 @@ async fn public_middleware(
                 .into_response();
         }
     }
+    next.run(request).await
+}
 
+async fn gallery_delete_auth_middleware(
+    State(state): State<DeleteAuthCheckState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.is_localhost && !state.has_api_key {
+        let body = OpenAiErrorResponse::with_code(
+            "API key required for gallery deletion on non-local bind",
+            "authentication_error",
+            "api_key_required",
+        );
+        return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+    }
     next.run(request).await
 }
 

@@ -73,6 +73,7 @@ async fn start_tool_server() -> (
         health_admin: Arc::new(DefaultHealthAdminService::new(None)),
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine) as Arc<dyn ToolEngine>,
+        gallery_service: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -239,6 +240,7 @@ async fn http_chat_invalid_tool_output_falls_back_to_text_with_warning_header() 
         health_admin: Arc::new(DefaultHealthAdminService::new(None)),
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine) as Arc<dyn ToolEngine>,
+        gallery_service: None,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
