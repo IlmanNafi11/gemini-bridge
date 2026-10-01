@@ -168,9 +168,9 @@
   - Files: `crates/conversation-store/src/branch.rs`, `crates/http-server/src/handlers/conversations.rs`, `crates/openai-compat/src/chat_models.rs`, `tests/e2e_conversations_test.rs`
   - Depends on: Tasks 1.1, 2.1
 
-- [ ] **Task 2.3: Add tool-call emulation and result continuation**
+- [x] **Task 2.3: Add tool-call emulation and result continuation**
   - Acceptance: `tools[]` and `tool_choice` map to prompt schema; valid model output becomes structured tool calls; tool results continue as role `tool`; malformed output falls back to text with structured warning; parse rate ≥95% on 50 cases.
-  - Verify: `cargo test -p gemini-bridge-tool-calling`; deterministic 50-case parser suite and one full chat round-trip.
+  - Verify: `cargo test -p gemini-bridge-tool-calling` (75 passed, including deterministic 50/50 benchmark); `cargo test --test tool_calling_test` (2 passed); `cargo test --workspace` (285 passed); workspace clippy, fmt, and build pass.
   - Files: `crates/tool-calling/src/lib.rs`, `crates/tool-calling/src/injector.rs`, `crates/tool-calling/src/parser.rs`, `crates/openai-compat/src/tools.rs`, `tests/tool_calling_test.rs`
   - Depends on: Tasks 0.7, 1.1
 
