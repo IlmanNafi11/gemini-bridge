@@ -1,0 +1,29 @@
+[package]
+name = "gemini-bridge-image-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+bytes = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+gemini-bridge-llm-service  = { path = "../llm-service" }
+gemini-bridge-media-store  = { path = "../media-store" }
+gemini-bridge-upload       = { path = "../upload" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tempfile    = "3"
+gemini-bridge-media-store = { path = "../media-store" }

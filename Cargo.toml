@@ -31,6 +31,11 @@ gemini-bridge-openai-compat = { path = "crates/openai-compat" }
 gemini-bridge-http-server = { path = "crates/http-server" }
 gemini-bridge-upload = { path = "crates/upload" }
 gemini-bridge-media-store = { path = "crates/media-store" }
+gemini-bridge-image-gen = { path = "crates/image-gen" }
+gemini-bridge-llm-service = { path = "crates/llm-service" }
+base64 = "0.22"
+futures = { workspace = true }
+parking_lot = { workspace = true }
 
 [workspace]
 resolver = "2"
@@ -45,6 +50,7 @@ members = [
     "crates/http-server",
     "crates/media-store",
     "crates/upload",
+    "crates/image-gen",
 ]
 
 [workspace.package]
@@ -55,6 +61,7 @@ authors = ["Afi"]
 
 [workspace.dependencies]
 thiserror = "2"
+parking_lot = "0.12"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

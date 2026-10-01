@@ -596,15 +596,20 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "clap",
+ "futures",
  "gemini-bridge-adapter-gemini",
  "gemini-bridge-config",
  "gemini-bridge-http-server",
  "gemini-bridge-identity",
+ "gemini-bridge-image-gen",
+ "gemini-bridge-llm-service",
  "gemini-bridge-media-store",
  "gemini-bridge-openai-compat",
  "gemini-bridge-upload",
+ "parking_lot",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -656,6 +661,7 @@ dependencies = [
  "gemini-bridge-adapter-gemini",
  "gemini-bridge-config",
  "gemini-bridge-identity",
+ "gemini-bridge-image-gen",
  "gemini-bridge-llm-service",
  "gemini-bridge-openai-compat",
  "gemini-bridge-transport",
@@ -694,6 +700,28 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "gemini-bridge-image-gen"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "gemini-bridge-llm-service",
+ "gemini-bridge-media-store",
+ "gemini-bridge-upload",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

@@ -23,6 +23,7 @@ gemini-bridge-llm-service = { path = "../llm-service" }
 gemini-bridge-adapter-gemini = { path = "../gemini-adapter" }
 gemini-bridge-openai-compat = { path = "../openai-compat" }
 gemini-bridge-upload = { path = "../upload" }
+gemini-bridge-image-gen = { path = "../image-gen" }
 
 [dev-dependencies]
 reqwest = { workspace = true }

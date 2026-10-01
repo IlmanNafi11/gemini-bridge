@@ -301,6 +301,14 @@ impl LlmAdapter for DefaultGeminiAdapter {
             .map_err(map_llm_error)
     }
 
+    async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<Value, LlmError> {
+        let body = self
+            .execute_wire_request(&request)
+            .await
+            .map_err(map_llm_error)?;
+        parse_raw_response(&body).map_err(map_llm_error)
+    }
+
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
         use crate::stream::parse_stream_body;
         let response_bytes = self
@@ -341,6 +349,30 @@ fn metadata_string<'a>(
         ))),
         None => Ok(None),
     }
+}
+
+/// Parse Gemini newline-framed output into a JSON array while preserving the
+/// complete provider response tree. Numeric framing lines and the XSSI prefix
+/// are excluded.
+pub fn parse_raw_response(body: &[u8]) -> Result<Value, GeminiAdapterError> {
+    let response = std::str::from_utf8(body).map_err(|error| {
+        GeminiAdapterError::SchemaMismatch(format!("response is not UTF-8: {error}"))
+    })?;
+    let mut frames = Vec::new();
+    for line in response.lines().map(str::trim) {
+        if line.is_empty() || line == ")]}'" || line.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            frames.push(value);
+        }
+    }
+    if frames.is_empty() {
+        return Err(GeminiAdapterError::SchemaMismatch(
+            "response contained no JSON frames".to_owned(),
+        ));
+    }
+    Ok(Value::Array(frames))
 }
 
 /// Parse newline-framed Gemini Web output and return the latest cumulative text.

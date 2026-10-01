@@ -110,6 +110,7 @@ async fn make_state(
         AppState {
             adapter,
             upload_service: None,
+            image_service: None,
         },
         srv_config,
     )

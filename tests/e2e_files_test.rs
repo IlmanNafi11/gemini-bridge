@@ -121,6 +121,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
         AppState {
             adapter,
             upload_service: Some(upload_service),
+            image_service: None,
         },
     );
 

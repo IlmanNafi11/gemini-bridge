@@ -158,8 +158,20 @@ pub trait LlmAdapter: Send + Sync {
     /// Unique identifier for this provider (e.g. `"gemini-web"`).
     fn provider_id(&self) -> &'static str;
 
-    /// Execute a non-streaming completion and return the full result.
+    /// Execute a non-streaming completion and return the normalized result.
     async fn complete(&self, request: Arc<LlmRequest>) -> Result<Completion, LlmError>;
+
+    /// Execute a non-streaming completion and preserve the provider payload.
+    ///
+    /// Adapters that do not expose structured payloads may use the default,
+    /// which wraps the normalized text in a JSON string. Media pipelines use
+    /// this hook to extract provider-owned attachment URLs without coupling to
+    /// a concrete adapter.
+    async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<serde_json::Value, LlmError> {
+        self.complete(request)
+            .await
+            .map(|completion| serde_json::Value::String(completion.text))
+    }
 
     /// Execute a streaming completion; returns an event stream.
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError>;
