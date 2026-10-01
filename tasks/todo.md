@@ -180,9 +180,9 @@
   - Files: `crates/gallery/src/lib.rs`, `crates/gallery/src/handlers.rs`, `crates/gallery/static/gallery.html`, `crates/http-server/src/handlers/gallery.rs`, `tests/gallery_test.rs`
   - Depends on: Tasks 0.7, 1.2, 1.4
 
-- [ ] **Task 2.5: Add media purge and TTL administration**
+- [x] **Task 2.5: Add media purge and TTL administration**
   - Acceptance: Configured TTL cleanup and protected purge endpoint remove expired or requested cached media and metadata consistently.
-  - Verify: `cargo test -p gemini-bridge-media-store`; route test verifies authorization and retained non-expired media.
+  - Verify: `cargo test -p gemini-bridge-media-store`; `cargo test --test media_purge_test` (6 tests pass); `cargo test --workspace` (306 tests pass); workspace clippy and fmt checks pass.
   - Files: `crates/media-store/src/cleanup.rs`, `crates/health-admin/src/purge.rs`, `crates/http-server/src/handlers/admin.rs`, `tests/media_purge_test.rs`
   - Depends on: Tasks 1.2, 1.5
 
