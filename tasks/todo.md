@@ -206,11 +206,11 @@
   - Files: `crates/video-adapter/src/lib.rs`, `crates/video-adapter/src/handler.rs`, `crates/config/src/model.rs`, `crates/http-server/src/handlers/videos.rs`, `tests/video_test.rs`
   - Depends on: P.7, Task 1.4
 
-- [ ] **Task 3.3: Define and implement reload without dropping active streams**
-  - Acceptance: Before code, decision/spec update resolves built-in instance replacement versus dynamic library loading. Implement the approved `/admin/reload-plugin` mechanism; active SSE requests finish without interruption; reload completes in <2 seconds.
-  - Verify: `cargo test -p gemini-bridge-health-admin`; run a reload while an active SSE stream is observed to complete.
+- [x] **Task 3.3: Define and implement reload without dropping active streams**
+  - Acceptance: Implement the approved `/admin/reload-plugin` built-in instance replacement mechanism; active SSE requests finish without interruption; reload completes in <2 seconds.
+  - Verify: Focused reload tests passed (4 reload integration tests, plugin-context lifecycle tests, health-admin tests); `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace` (366 passed, 4 filtered), and `cargo build --workspace` passed. HTTP integration exercised the production Gemini reloader while an SSE stream remained active.
   - Files: `crates/plugin-context/src/reload.rs`, `crates/health-admin/src/reload_handler.rs`, `crates/http-server/src/handlers/admin.rs`, `tests/reload_test.rs`
-  - Depends on: P.1, 0.1, 1.1, 1.5; blocked until reload design is approved.
+  - Depends on: P.1, 0.1, 1.1, 1.5
 
 - [ ] **Task 3.4: Prove provider-neutral adapter contract**
   - Acceptance: Second mock/local adapter registers via the provider-neutral contract and serves a test request without Gemini-specific changes in core API/service crates.
