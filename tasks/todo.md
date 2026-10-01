@@ -129,9 +129,9 @@
   - Files: `crates/image-gen/src/lib.rs`, `crates/image-gen/src/extractor.rs`, `crates/http-server/src/handlers/images.rs`, `crates/media-store/src/metadata.rs`, `tests/e2e_image_test.rs`
   - Depends on: Tasks 0.7, 1.2, 1.3
 
-- [ ] **Task 1.5: Add health, readiness, admin status and reauth surfaces**
+- [x] **Task 1.5: Add health, readiness, admin status and reauth surfaces**
   - Acceptance: `/healthz` reports process/uptime/version; `/readyz` reports session/build-label/cookie-age states; `/admin/status` is protected; guided `/admin/reauth` moves between needs-reauth and valid states.
-  - Verify: `cargo test -p gemini-bridge-health-admin`; endpoint tests include auth boundary and state transitions.
+  - Verify: `cargo test -p gemini-bridge-health-admin` (5 tests), `cargo test --test health_admin_test` (15 tests), `cargo test --workspace` (175 passed), workspace clippy and fmt checks pass.
   - Files: `crates/health-admin/src/lib.rs`, `crates/health-admin/src/readiness.rs`, `crates/http-server/src/handlers/health.rs`, `crates/http-server/src/handlers/admin.rs`, `tests/health_admin_test.rs`
   - Depends on: Tasks 0.4, 0.7
 
