@@ -44,6 +44,7 @@ impl LlmAdapter for ContractAdapter {
             Ok(LlmEvent::Completed(CompletionSummary {
                 finish_reason: "stop".to_owned(),
                 usage: None,
+                metadata: None,
             })),
         ];
         Ok(Box::pin(stream::iter(events)))

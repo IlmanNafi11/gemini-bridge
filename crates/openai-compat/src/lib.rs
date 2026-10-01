@@ -4,6 +4,8 @@
 //! `/v1/models`, and error envelopes. It does NOT import Axum, reqwest, or
 //! any provider-specific crate.
 
+pub mod metadata;
+pub use metadata::{CitationMeta, CodeExecutionMeta, GeminiMetadata};
 pub mod models;
 pub mod tools;
 
@@ -165,6 +167,8 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChatChoiceDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

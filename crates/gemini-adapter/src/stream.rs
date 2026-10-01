@@ -11,12 +11,14 @@
 //! bytes.
 
 use futures::stream;
-use gemini_bridge_llm_service::{CompletionSummary, LlmError, LlmEvent, LlmEventStream};
+use gemini_bridge_llm_service::{
+    CompletionSummary, LlmError, LlmEvent, LlmEventStream, ProviderMetadata,
+};
 use serde_json::Value;
 
 use crate::prefix_diff::{Delta, PrefixDiff};
 use crate::schema::GeminiWebSchema;
-use crate::{GeminiAdapterError, find_candidate_text};
+use crate::{GeminiAdapterError, find_candidate_text, parse_non_stream_metadata};
 
 /// Parse a complete Gemini `StreamGenerate` body into an ordered sequence of
 /// [`LlmEvent`]s and box it as an [`LlmEventStream`].
@@ -34,6 +36,15 @@ pub fn parse_stream_body(
         GeminiAdapterError::SchemaMismatch(format!("stream body is not UTF-8: {e}"))
     })?;
 
+    let metadata = parse_non_stream_metadata(body).map(|meta| ProviderMetadata {
+        raw: serde_json::json!({
+            "conversation_id": meta.conversation_id,
+            "response_id": meta.response_id,
+            "candidate_id": meta.candidate_id,
+            "code_execution": meta.code_execution,
+            "citations": meta.citations,
+        }),
+    });
     let mut diff = PrefixDiff::new();
     let mut events: Vec<Result<LlmEvent, LlmError>> = Vec::new();
     let mut parsed_frame = false;
@@ -69,6 +80,7 @@ pub fn parse_stream_body(
     events.push(Ok(LlmEvent::Completed(CompletionSummary {
         finish_reason: "stop".to_owned(),
         usage: None,
+        metadata,
     })));
 
     Ok(Box::pin(stream::iter(events)))

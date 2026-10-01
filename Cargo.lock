@@ -619,6 +619,7 @@ dependencies = [
  "clap",
  "futures",
  "gemini-bridge-adapter-gemini",
+ "gemini-bridge-code-exec",
  "gemini-bridge-config",
  "gemini-bridge-conversation-store",
  "gemini-bridge-gallery",
@@ -663,6 +664,18 @@ dependencies = [
  "toml",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "gemini-bridge-code-exec"
+version = "0.1.0"
+dependencies = [
+ "gemini-bridge-adapter-gemini",
+ "gemini-bridge-llm-service",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -726,6 +739,7 @@ dependencies = [
  "bytes",
  "futures",
  "gemini-bridge-adapter-gemini",
+ "gemini-bridge-code-exec",
  "gemini-bridge-config",
  "gemini-bridge-conversation-store",
  "gemini-bridge-gallery",

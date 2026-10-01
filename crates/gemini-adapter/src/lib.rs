@@ -23,6 +23,7 @@ use gemini_bridge_llm_service::{
 };
 use gemini_bridge_transport::{Idempotency, ReqwestTransport, TransportRequest, TransportService};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
@@ -62,7 +63,7 @@ pub struct StreamChunk {
     pub metadata: Option<GeminiWebMetadata>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GeminiWebMetadata {
     pub conversation_id: Option<String>,
     pub response_id: Option<String>,
@@ -71,14 +72,14 @@ pub struct GeminiWebMetadata {
     pub citations: Vec<CitationRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeExecutionBlock {
     pub language: String,
     pub code: String,
     pub output: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CitationRef {
     pub start_index: usize,
     pub end_index: usize,
@@ -275,6 +276,8 @@ impl DefaultGeminiAdapter {
                     "conversation_id": m.conversation_id,
                     "response_id": m.response_id,
                     "candidate_id": m.candidate_id,
+                    "code_execution": m.code_execution,
+                    "citations": m.citations,
                 }),
             }),
         })
@@ -311,12 +314,17 @@ impl GeminiAdapter for DefaultGeminiAdapter {
                     finish_reason: None,
                     metadata: None,
                 })),
-                Ok(LlmEvent::Completed(summary)) => Some(Ok(StreamChunk {
-                    delta_text: None,
-                    is_finished: true,
-                    finish_reason: Some(summary.finish_reason),
-                    metadata: None,
-                })),
+                Ok(LlmEvent::Completed(summary)) => {
+                    let metadata = summary
+                        .metadata
+                        .and_then(|pm| serde_json::from_value::<GeminiWebMetadata>(pm.raw).ok());
+                    Some(Ok(StreamChunk {
+                        delta_text: None,
+                        is_finished: true,
+                        finish_reason: Some(summary.finish_reason),
+                        metadata,
+                    }))
+                }
                 Ok(_) => None,
                 Err(e) => Some(Err(GeminiAdapterError::Transport(e.to_string()))),
             }
@@ -504,6 +512,8 @@ pub fn parse_non_stream_metadata(body: &[u8]) -> Option<GeminiWebMetadata> {
         || meta.conversation_id.is_some()
         || meta.response_id.is_some()
         || meta.candidate_id.is_some()
+        || !meta.code_execution.is_empty()
+        || !meta.citations.is_empty()
     {
         Some(meta)
     } else {
@@ -541,8 +551,50 @@ fn extract_metadata_recursive(value: &Value, meta: &mut GeminiWebMetadata) -> bo
             meta.candidate_id = Some(cand.clone());
             found = true;
         }
-    }
 
+        if let (Some(Value::String(lang)), Some(Value::String(code))) =
+            (map.get("language"), map.get("code"))
+        {
+            let output = map
+                .get("output")
+                .or_else(|| map.get("stdout"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let block = CodeExecutionBlock {
+                language: lang.clone(),
+                code: code.clone(),
+                output,
+            };
+            if !meta.code_execution.contains(&block) {
+                meta.code_execution.push(block);
+                found = true;
+            }
+        }
+
+        if let Some(Value::String(uri)) = map.get("uri").or_else(|| map.get("url")) {
+            let start = map
+                .get("start_index")
+                .or_else(|| map.get("startIndex"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let end = map
+                .get("end_index")
+                .or_else(|| map.get("endIndex"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let title = map.get("title").and_then(|v| v.as_str()).map(str::to_owned);
+            let citation = CitationRef {
+                start_index: start,
+                end_index: end,
+                uri: uri.clone(),
+                title,
+            };
+            if !meta.citations.contains(&citation) {
+                meta.citations.push(citation);
+                found = true;
+            }
+        }
+    }
     match value {
         Value::Array(items) => {
             for item in items {

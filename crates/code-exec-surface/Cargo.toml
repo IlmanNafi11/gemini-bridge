@@ -1,0 +1,15 @@
+[package]
+name = "gemini-bridge-code-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+gemini-bridge-adapter-gemini = { path = "../gemini-adapter" }
+gemini-bridge-llm-service = { path = "../llm-service" }
+
+[dev-dependencies]
+tokio = { workspace = true }

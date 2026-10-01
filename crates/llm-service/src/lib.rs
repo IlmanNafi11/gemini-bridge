@@ -105,6 +105,7 @@ pub struct Usage {
 pub struct CompletionSummary {
     pub finish_reason: String,
     pub usage: Option<Usage>,
+    pub metadata: Option<ProviderMetadata>,
 }
 
 /// A discrete event on the LLM event stream.

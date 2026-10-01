@@ -29,6 +29,7 @@ gemini-bridge-middleware = { path = "../middleware" }
 gemini-bridge-conversation-store = { path = "../conversation-store" }
 gemini-bridge-tool-calling = { path = "../tool-calling" }
 gemini-bridge-gallery = { path = "../gallery" }
+gemini-bridge-code-exec = { path = "../code-exec-surface" }
 
 [dev-dependencies]
 reqwest = { workspace = true }

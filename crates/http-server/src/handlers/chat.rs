@@ -15,6 +15,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 
+use gemini_bridge_code_exec::extract_from_value;
 use gemini_bridge_conversation_store::{ConversationStore, ConversationStoreError, StoredMessage};
 use gemini_bridge_llm_service::{
     Completion, ContentPart, LlmError, LlmEvent, LlmRequest, Message, ModelSelector, Role,
@@ -330,6 +331,21 @@ async fn non_stream_response(
         )
     };
 
+    let mut gemini_metadata = completion
+        .metadata
+        .as_ref()
+        .and_then(|metadata| extract_from_value(&metadata.raw))
+        .and_then(|metadata| serde_json::to_value(metadata).ok());
+    if let Some(context) = &continuation {
+        let value = gemini_metadata.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(map) = value.as_object_mut() {
+            map.insert(
+                "conversation_id".to_owned(),
+                serde_json::json!(context.conversation_id),
+            );
+        }
+    }
+
     let resp = ChatCompletionResponse {
         id: new_completion_id(),
         object: "chat.completion",
@@ -341,9 +357,7 @@ async fn non_stream_response(
             finish_reason,
         }],
         usage,
-        gemini_metadata: continuation
-            .as_ref()
-            .map(|context| serde_json::json!({ "conversation_id": context.conversation_id })),
+        gemini_metadata,
     };
 
     let mut response = (StatusCode::OK, Json(resp)).into_response();
@@ -606,6 +620,7 @@ async fn stream_response(
                         },
                         finish_reason: None,
                     }],
+                    gemini_metadata: None,
                 };
                 serde_json::to_string(&chunk).unwrap_or_default()
             }
@@ -623,6 +638,11 @@ async fn stream_response(
                         },
                         finish_reason: Some(summary.finish_reason),
                     }],
+                    gemini_metadata: summary
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| extract_from_value(&metadata.raw))
+                        .and_then(|metadata| serde_json::to_value(metadata).ok()),
                 };
                 serde_json::to_string(&chunk).unwrap_or_default()
             }
