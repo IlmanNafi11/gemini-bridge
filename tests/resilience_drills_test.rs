@@ -28,6 +28,7 @@ fn bridge_config(tmp: &std::path::Path) -> BridgeConfig {
             port: 0,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir: tmp.to_path_buf(),
@@ -104,6 +105,7 @@ async fn build_test_app(
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         app_state,
     );
@@ -377,6 +379,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
                     require_key_for_admin: false,
                     cors_enabled: false,
                     rate_limit: None,
+                    metrics_enabled: false,
                 },
                 app_state,
             ),

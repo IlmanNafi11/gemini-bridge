@@ -91,6 +91,7 @@ async fn test_server() -> (
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         state,
     );

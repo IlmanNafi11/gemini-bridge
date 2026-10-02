@@ -81,6 +81,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             port,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir: temp.path().to_path_buf(),
@@ -119,6 +120,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         AppState {
             adapter,

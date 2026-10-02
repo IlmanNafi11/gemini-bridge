@@ -58,6 +58,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             port,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir,
@@ -87,6 +88,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
         require_key_for_admin: false,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
 
     (

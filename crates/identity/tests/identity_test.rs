@@ -269,6 +269,7 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
             port: 8090,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir: dir.path().to_path_buf(),
@@ -307,6 +308,7 @@ async fn apply_auth_headers_sets_expected_headers() {
             port: 8090,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir: dir.path().to_path_buf(),

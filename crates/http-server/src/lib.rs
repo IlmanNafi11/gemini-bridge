@@ -4,6 +4,7 @@
 //! and wires handlers to the LLM adapter.
 
 pub mod handlers;
+pub mod metrics;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use gemini_bridge_health_admin::{
 use gemini_bridge_identity::DefaultIdentityService;
 use gemini_bridge_llm_service::{LlmAdapter, ReloadableAdapter};
 use gemini_bridge_middleware::{
-    AdmissionDecision, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
+    AdmissionDecision, HttpMetrics, RedactionFilter, TokenBucketConfig, TokenBucketLimiter,
 };
 use gemini_bridge_openai_compat::OpenAiErrorResponse;
 use gemini_bridge_tool_calling::{DefaultToolEngine, ToolEngine};
@@ -52,8 +53,9 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     pub require_key_for_admin: bool,
     pub cors_enabled: bool,
-    /// Optional per-client request rate limit for authenticated public routes.
     pub rate_limit: Option<TokenBucketConfig>,
+    /// Enable the authenticated Prometheus metrics endpoint and HTTP instrumentation.
+    pub metrics_enabled: bool,
 }
 /// Shared state threaded through all Axum handlers.
 #[derive(Clone)]
@@ -94,7 +96,9 @@ pub enum ServerError {
 pub fn build_router(config: ServerConfig, state: AppState) -> Router {
     let x_request_id = header::HeaderName::from_static("x-request-id");
     let api_key = config.api_key.clone();
-
+    let metrics = config
+        .metrics_enabled
+        .then(|| Arc::new(HttpMetrics::default()));
     let public_routes = Router::new()
         .route(
             "/v1/chat/completions",
@@ -167,11 +171,18 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
 
     let mut admin_routes = Router::new()
         .route("/admin/status", routing::get(handlers::admin::admin_status))
+        .route("/admin/dashboard", routing::get(handlers::admin::dashboard))
         .route("/admin/reauth", routing::post(handlers::admin::reauth))
         .route(
             "/admin/reload-plugin",
             routing::post(handlers::admin::reload_plugin),
         );
+    if let Some(metrics) = metrics.clone() {
+        admin_routes = admin_routes.route(
+            "/metrics",
+            routing::get(metrics::scrape).layer(axum::Extension(metrics)),
+        );
+    }
     if state.media_purge.is_some() {
         admin_routes =
             admin_routes.route("/admin/purge", routing::post(handlers::admin::purge_media));
@@ -186,6 +197,10 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         .merge(health_routes)
         .merge(admin_routes)
         .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            metrics,
+            metrics::collect_requests,
+        ))
         .layer(middleware::from_fn(audit_middleware))
         .layer(PropagateRequestIdLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))

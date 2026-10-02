@@ -1,8 +1,10 @@
 mod audit;
+mod metrics_layer;
 mod rate_limit;
 mod redact;
 
 pub use audit::{AuditLogEntry, AuditSink};
+pub use metrics_layer::{HttpMetricLabels, HttpMetrics};
 pub use rate_limit::{AdmissionDecision, TokenBucketConfig, TokenBucketLimiter};
 pub use redact::RedactionFilter;
 

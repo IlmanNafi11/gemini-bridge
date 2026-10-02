@@ -245,6 +245,7 @@ async fn test_admin_reload_auth_matrix() {
         require_key_for_admin: true,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
 
     let router = build_router(srv_cfg, state);
@@ -360,6 +361,7 @@ async fn test_active_sse_stream_preservation_during_reload() {
         require_key_for_admin: true,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
 
     let router = build_router(srv_cfg, state);

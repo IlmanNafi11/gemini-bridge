@@ -77,6 +77,7 @@ async fn spawn_server(
         require_key_for_admin: true,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
     let router = build_router(config, state);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
@@ -272,6 +273,7 @@ async fn purge_route_disabled_when_no_media_store_in_state() {
         require_key_for_admin: true,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
     let router = build_router(config, state);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))

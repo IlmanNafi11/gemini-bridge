@@ -116,6 +116,7 @@ fn build_test_router_with_rate_limit(
         require_key_for_admin: false,
         cors_enabled: false,
         rate_limit,
+        metrics_enabled: false,
     };
     let adapter = Arc::new(MockAdapter);
     let identity = Arc::new(MockIdentity);

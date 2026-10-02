@@ -74,6 +74,7 @@ async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHan
         require_key_for_admin: false,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
     let router = build_router(config, state);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))

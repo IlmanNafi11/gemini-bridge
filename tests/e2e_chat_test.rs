@@ -77,6 +77,7 @@ async fn make_state(
             port,
             api_key: api_key.clone(),
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir,
@@ -106,6 +107,7 @@ async fn make_state(
         require_key_for_admin: false,
         cors_enabled: false,
         rate_limit: None,
+        metrics_enabled: false,
     };
 
     (

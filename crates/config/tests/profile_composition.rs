@@ -4,6 +4,28 @@ use gemini_bridge_config::{BridgeConfig, Composition, ConfigError};
 use tempfile::tempdir;
 
 #[test]
+fn profiles_can_enable_metrics() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(
+        &path,
+        r#"
+[profiles.observability.server]
+metrics_enabled = true
+"#,
+    )
+    .unwrap();
+
+    let config = BridgeConfig::load_composed(
+        Some(&path),
+        &Composition::new().with_profile("observability"),
+    )
+    .unwrap();
+
+    assert!(config.server.metrics_enabled);
+}
+
+#[test]
 fn composes_profiles_bundles_and_patches_in_deterministic_order() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("bridge.toml");

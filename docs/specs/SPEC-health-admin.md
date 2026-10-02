@@ -20,13 +20,14 @@ The `health-admin` module exposes process health, Gemini session readiness, admi
 - `/admin/reauth` — guided re-authentication POST endpoint that triggers a fresh cookie import and re-bootstrap through `identity`, transitioning session state from `NeedsReauth` to `Valid`.
 - Bounded 405 build-label auto-recovery: when `gemini-adapter` detects a 405 response, the `health-admin` layer coordinates a single `identity.bootstrap()` refresh and one upstream retry. No second retry is issued.
 - (Fase 3) `/admin/reload-plugin` — hot-swap a named plugin instance without terminating active SSE streams. Implemented via built-in instance replacement wrapped in `Arc<tokio::sync::RwLock<T>>` to ensure active streams hold their older `Arc` securely.
+- (Fase 3) `/admin/dashboard` — authenticated, dependency-free HTML status summary rendered from existing local health and session snapshots.
 
 **Out of scope:**
 - HTTP routing infrastructure, SSE streaming (→ `http-server`).
 - Cookie rotation scheduling, `1PSIDTS` refresh, and `IpFlagged` detection (→ `identity`).
 - Media purge administration (→ `media-store`, Task 2.5).
 - Rate limiting or request audit logging (→ `middleware`).
-- Prometheus metrics exposition (→ Fase 3 `http-server` extension).
+- Prometheus metrics collection and exposition (→ Fase 3 `middleware` + `http-server` extension).
 
 ---
 

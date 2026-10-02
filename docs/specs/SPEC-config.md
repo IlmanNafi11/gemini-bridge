@@ -42,6 +42,8 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub cors_enabled: bool,
+    #[serde(default)]
+    pub metrics_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,6 +116,7 @@ selection order, and `BRIDGE_*` environment overrides.
    - Port: `8090`.
    - Data directory: `~/.local/share/gemini-bridge/` (XDG compliant).
    - TLS Profile: `chrome`.
+   - Prometheus metrics: disabled (`server.metrics_enabled = false`).
 4. **Security Invariant:** API keys or passwords in the config struct must have `Debug` output masked.
 
 ---
@@ -122,6 +125,7 @@ selection order, and `BRIDGE_*` environment overrides.
 
 - **Unit Tests:**
   - Parsing default TOML without optional fields.
+  - Metrics are disabled when omitted and can be enabled by TOML or a selected profile/patch.
   - Ordered profile, bundle, and patch precedence including bundle-member references.
   - Environment override precedence over the full composition (`BRIDGE_SERVER_PORT=9000`).
   - Clear rejection of unknown names/references, duplicate selections, conflicting `dev`/`prod` profiles, unknown overlay fields, and invalid values (e.g. port `0`).

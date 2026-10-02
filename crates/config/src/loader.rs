@@ -214,7 +214,13 @@ fn validate_overlay_fields(value: &Value, kind: &str, name: &str) -> Result<(), 
     })?;
     for (section, settings) in root {
         let allowed: &[&str] = match section.as_str() {
-            "server" => &["bind_addr", "port", "api_key", "cors_enabled"],
+            "server" => &[
+                "bind_addr",
+                "port",
+                "api_key",
+                "cors_enabled",
+                "metrics_enabled",
+            ],
             "storage" => &["data_dir", "media_ttl_days"],
             "transport" => &["tls_profile", "proxy_url", "timeout_secs"],
             "video" => &["enabled"],
@@ -253,6 +259,7 @@ fn defaults_figment() -> Figment {
         port: 8090,
         api_key: None,
         cors_enabled: false,
+        metrics_enabled: false,
     };
     let default_storage = StorageConfig {
         data_dir: xdg_data_dir(),

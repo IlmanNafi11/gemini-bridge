@@ -224,9 +224,9 @@
   - Files: `crates/config/src/profiles.rs`, `crates/config/src/overlay.rs`, `crates/config/tests/profile_composition.rs`
   - Depends on: 0.2
 
-- [ ] **Task 3.6: Add opt-in metrics and lightweight status dashboard**
+- [x] **Task 3.6: Add opt-in metrics and lightweight status dashboard**
   - Acceptance: `/metrics` is disabled by default; when enabled, exposes Prometheus-compatible request/error/latency data; status surface remains minimal and uses local service state.
-  - Verify: `cargo test -p gemini-bridge-http-server`; scrape endpoint and confirm disabled/enabled behavior.
+  - Verify: `cargo test --test metrics_test` (5 passed); `cargo test -p gemini-bridge-config` (22 passed); `cargo test -p gemini-bridge-middleware` (8 passed); `cargo test --workspace` (394 passed); `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo build --workspace` passed.
   - Files: `crates/http-server/src/metrics.rs`, `crates/middleware/src/metrics_layer.rs`, `crates/health-admin/src/dashboard.rs`, `tests/metrics_test.rs`
   - Depends on: 1.5, 1.7
 

@@ -33,6 +33,19 @@ pub async fn admin_status(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(response)).into_response()
 }
 
+/// `GET /admin/dashboard`: minimal HTML from local process and session snapshots.
+pub async fn dashboard(State(state): State<AppState>) -> Response {
+    let health = state.health_admin.health().await;
+    let status = state.health_admin.admin_status().await;
+    let html = gemini_bridge_health_admin::render_dashboard(&health, &status);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct ReauthRequest {
     #[serde(alias = "raw_cookie_header")]

@@ -14,12 +14,23 @@ fn empty_toml_applies_all_defaults() {
     assert_eq!(config.server.port, 8090);
     assert_eq!(config.server.api_key, None);
     assert!(!config.server.cors_enabled);
+    assert!(!config.server.metrics_enabled);
     assert_eq!(config.storage.data_dir, default_data_dir());
     assert_eq!(config.storage.media_ttl_days, 30);
     assert_eq!(config.transport.tls_profile, "chrome");
     assert_eq!(config.transport.proxy_url, None);
     assert_eq!(config.transport.timeout_secs, 30);
     assert!(!config.video.enabled);
+}
+
+#[test]
+fn metrics_can_be_enabled_explicitly() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(&path, "[server]\nmetrics_enabled = true\n").unwrap();
+
+    let config = BridgeConfig::load_from_file(&path).unwrap();
+    assert!(config.server.metrics_enabled);
 }
 
 #[test]

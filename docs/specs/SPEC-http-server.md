@@ -114,6 +114,9 @@ pub fn build_reloadable_gemini_adapter(
 | `GET` | `/gallery` | Optional | Fase 2 | `gallery` |
 | `POST` | `/admin/reload-plugin` | Always requires key | Fase 3 | `health-admin` / `plugin-context` |
 | `GET` | `/metrics` | Protected / opt-in | Fase 3 | `http-server` (metrics) |
+| `GET` | `/admin/dashboard` | Always requires key | Fase 3 | `health-admin` / `http-server` |
+
+`/metrics` is omitted from the router unless `metrics_enabled` is true and is protected by the admin bearer key when present. It exposes bounded-cardinality request/error counters and request-duration histograms in Prometheus text format. `/admin/dashboard` is a dependency-free HTML status surface rendered only from local health and identity snapshots.
 
 ---
 

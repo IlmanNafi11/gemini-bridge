@@ -136,6 +136,7 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         AppState {
             adapter: adapter.clone(),
@@ -220,6 +221,7 @@ async fn b64_response_decodes_to_generated_image_bytes() {
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         AppState {
             adapter,
@@ -281,6 +283,7 @@ async fn missing_image_id_returns_not_found() {
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         AppState {
             adapter,

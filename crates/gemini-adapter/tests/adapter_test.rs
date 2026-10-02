@@ -25,6 +25,7 @@ fn make_config(temp_dir: &std::path::Path) -> Arc<BridgeConfig> {
             port: 8090,
             api_key: None,
             cors_enabled: false,
+            metrics_enabled: false,
         },
         storage: StorageConfig {
             data_dir: temp_dir.to_path_buf(),

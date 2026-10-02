@@ -63,6 +63,9 @@ pub struct ServerConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub cors_enabled: bool,
+    /// Enable local Prometheus metrics exposition. Disabled by default.
+    #[serde(default)]
+    pub metrics_enabled: bool,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -72,6 +75,7 @@ impl fmt::Debug for ServerConfig {
             .field("port", &self.port)
             .field("api_key", &self.api_key.as_ref().map(|_| "***REDACTED***"))
             .field("cors_enabled", &self.cors_enabled)
+            .field("metrics_enabled", &self.metrics_enabled)
             .finish()
     }
 }

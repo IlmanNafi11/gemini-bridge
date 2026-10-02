@@ -1,5 +1,6 @@
 //! Health, readiness, admin status, and session re-authentication service.
 
+pub mod dashboard;
 pub mod purge;
 pub mod readiness;
 pub mod reload_handler;
@@ -11,6 +12,7 @@ use tokio::sync::Mutex;
 use async_trait::async_trait;
 use gemini_bridge_identity::{IdentityService, SessionStatus};
 
+pub use dashboard::render_dashboard;
 pub use purge::{DefaultMediaPurgeAdminService, MediaPurgeAdminService, PurgeResult};
 pub use readiness::{
     AdminStatusResponse, HealthAdminError, HealthResponse, ReadinessResponse, ReauthResponse,

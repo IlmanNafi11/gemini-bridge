@@ -86,6 +86,7 @@ async fn start_tool_server() -> (
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         state,
     );
@@ -255,6 +256,7 @@ async fn http_chat_invalid_tool_output_falls_back_to_text_with_warning_header() 
             require_key_for_admin: false,
             cors_enabled: false,
             rate_limit: None,
+            metrics_enabled: false,
         },
         state,
     );
