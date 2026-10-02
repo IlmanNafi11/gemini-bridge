@@ -212,10 +212,10 @@
   - Files: `crates/plugin-context/src/reload.rs`, `crates/health-admin/src/reload_handler.rs`, `crates/http-server/src/handlers/admin.rs`, `tests/reload_test.rs`
   - Depends on: P.1, 0.1, 1.1, 1.5
 
-- [ ] **Task 3.4: Prove provider-neutral adapter contract**
+- [x] **Task 3.4: Prove provider-neutral adapter contract**
   - Acceptance: Second mock/local adapter registers via the provider-neutral contract and serves a test request without Gemini-specific changes in core API/service crates.
-  - Verify: `cargo test --test multi_adapter_test` proves routing to both implementations.
-  - Files: `crates/llm-service/tests/mock_adapter.rs`, `crates/plugin-context/tests/adapter_registry_test.rs`, `tests/multi_adapter_test.rs`
+  - Verify: `cargo test --test multi_adapter_test` proves the provider-neutral registry is registered through plugin context and routes completion and streaming requests to both implementations.
+  - Files: `crates/llm-service/src/lib.rs`, `crates/llm-service/tests/mock_adapter.rs`, `crates/llm-service/tests/contract_test.rs`, `tests/multi_adapter_test.rs`
   - Depends on: 0.1, 0.5, 0.7
 
 - [ ] **Task 3.5: Add profiles/bundles/patch overlays**
