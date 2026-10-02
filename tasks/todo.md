@@ -230,7 +230,7 @@
   - Files: `crates/http-server/src/metrics.rs`, `crates/middleware/src/metrics_layer.rs`, `crates/health-admin/src/dashboard.rs`, `tests/metrics_test.rs`
   - Depends on: 1.5, 1.7
 
-- [ ] **Task 3.7: Produce release artifacts and operational docs**
+- [x] **Task 3.7: Produce release artifacts and operational docs**
   - Acceptance: Static release build and optional container/service helper meet the approved packaging constraints; docs explain unofficial automation/ToS, account risk, credential handling, storage and cleanup. No deployment is executed.
   - Verify: release build for target platform; inspect binary size and run cold-start/health smoke; container build if enabled.
   - Files: `README.md`, `Dockerfile`, `deploy/systemd/gemini-bridge.service`, `docs/operations.md`, `.github/workflows/release.yml`
