@@ -9,6 +9,8 @@ pub enum ConfigError {
     ParseError(Box<figment::Error>),
     #[error("Validation failed: {0}")]
     ValidationError(String),
+    #[error("Invalid configuration composition: {0}")]
+    CompositionError(String),
 }
 impl From<figment::Error> for ConfigError {
     fn from(error: figment::Error) -> Self {

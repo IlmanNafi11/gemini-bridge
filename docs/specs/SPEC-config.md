@@ -25,10 +25,12 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("Configuration file not found: {0}")]
     FileNotFound(PathBuf),
-    #[error("TOML syntax error: {0}")]
-    ParseError(#[from] toml::de::Error),
+    #[error("Parse error: {0}")]
+    ParseError(Box<figment::Error>),
     #[error("Validation failed: {0}")]
     ValidationError(String),
+    #[error("Invalid configuration composition: {0}")]
+    CompositionError(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,22 +70,51 @@ pub struct BridgeConfig {
 
 impl BridgeConfig {
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, ConfigError>;
-    pub fn load_with_overrides(path: Option<&std::path::Path>, profile: Option<&str>) -> Result<Self, ConfigError>;
+    pub fn load_with_overrides(
+        path: Option<&std::path::Path>,
+        profile: Option<&str>,
+    ) -> Result<Self, ConfigError>;
+    pub fn load_composed(
+        path: Option<&std::path::Path>,
+        composition: &Composition,
+    ) -> Result<Self, ConfigError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Composition {
+    // Selected names are applied in insertion order.
+}
+
+impl Composition {
+    pub fn new() -> Self;
+    pub fn with_bundle(self, name: impl Into<String>) -> Self;
+    pub fn with_profile(self, name: impl Into<String>) -> Self;
+    pub fn with_patch(self, name: impl Into<String>) -> Self;
 }
 ```
+
+Composition TOML uses `[profiles.<name>]`, `[patches.<name>]`, and
+`[bundles.<name>]` tables. Each bundle may declare ordered `profiles = [...]`
+and `patches = [...]` lists. The legacy `[profile.<name>]` table remains
+accepted when no plural `[profiles]` table is present.
+
+Precedence, lowest to highest: defaults, base TOML, bundle-selected profiles
+in bundle/list order, explicitly selected profiles in selection order,
+bundle-selected patches in bundle/list order, explicitly selected patches in
+selection order, and `BRIDGE_*` environment overrides.
 
 ---
 
 ## 3. Behavior & Invariants
 
-1. **Precedence Hierarchy:**
-   `Environment Variables (BRIDGE_*)` > `Profile Overlay (e.g. [profile.dev])` > `Base TOML ([server], etc.)` > `Hardcoded Defaults`.
-2. **Sensible Defaults:**
+1. **Composition Precedence:** Defaults < base TOML < bundle profiles < explicit profiles < bundle patches < explicit patches < `BRIDGE_*` environment overrides. Selected names apply in insertion order.
+2. **Invalid Compositions:** Reject unknown selected names, missing bundle references, duplicate profile/patch selections, and simultaneous `dev`/`prod` selection. An unknown field in a selected overlay is rejected with the overlay name and field path.
+3. **Sensible Defaults:**
    - Bind address: `127.0.0.1` (never `0.0.0.0` by default).
    - Port: `8090`.
    - Data directory: `~/.local/share/gemini-bridge/` (XDG compliant).
    - TLS Profile: `chrome`.
-3. **Security Invariant:** API keys or passwords in the config struct must have `Debug` output masked.
+4. **Security Invariant:** API keys or passwords in the config struct must have `Debug` output masked.
 
 ---
 
@@ -91,9 +122,9 @@ impl BridgeConfig {
 
 - **Unit Tests:**
   - Parsing default TOML without optional fields.
-  - Profile overlay resolution (e.g., `lowmem` overrides buffer sizes).
-  - Environment variable override precedence tests (`BRIDGE_SERVER_PORT=9000`).
-  - Strict rejection of invalid configurations (e.g., invalid port `0`, unreachable path syntax).
+  - Ordered profile, bundle, and patch precedence including bundle-member references.
+  - Environment override precedence over the full composition (`BRIDGE_SERVER_PORT=9000`).
+  - Clear rejection of unknown names/references, duplicate selections, conflicting `dev`/`prod` profiles, unknown overlay fields, and invalid values (e.g. port `0`).
 - **Quality Gate:** 100% test pass on clippy and unit suite.
 
 ---
