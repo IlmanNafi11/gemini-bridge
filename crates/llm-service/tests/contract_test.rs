@@ -1,11 +1,15 @@
+#[path = "mock_adapter.rs"]
+mod mock_adapter;
+
+use mock_adapter::LocalAdapter;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use gemini_bridge_llm_service::{
-    Completion, CompletionSummary, ContentPart, LlmAdapter, LlmError, LlmEvent, LlmEventStream,
-    LlmRequest, LlmRouter, Message, ModelSelector, Role, ToolCall, Usage,
+    AdapterRegistry, Completion, CompletionSummary, ContentPart, LlmAdapter, LlmError, LlmEvent,
+    LlmEventStream, LlmRequest, LlmRouter, Message, ModelSelector, Role, ToolCall, Usage,
 };
 
 struct ContractAdapter;
@@ -157,4 +161,63 @@ fn shared_request_is_immutable_and_clone_is_arc_backed() {
 fn json_metadata_remains_provider_neutral() {
     let metadata = serde_json::json!({"trace": "opaque-extension"});
     assert_eq!(metadata["trace"], "opaque-extension");
+}
+#[tokio::test]
+async fn registry_routes_completions_to_two_provider_adapters() {
+    let registry = AdapterRegistry::new();
+    registry.register(Arc::new(ContractAdapter));
+    registry.register(Arc::new(LocalAdapter {
+        id: "second-test",
+        response: "second adapter",
+    }));
+
+    let first = registry
+        .adapter_for(&request().model)
+        .unwrap()
+        .complete(request())
+        .await
+        .unwrap();
+    let second_request = mock_adapter::request("second-test");
+    let second = registry
+        .adapter_for(&second_request.model)
+        .unwrap()
+        .complete(second_request)
+        .await
+        .unwrap();
+
+    assert_eq!(first.text, "hello");
+    assert_eq!(second.text, "second adapter");
+}
+
+#[tokio::test]
+async fn registry_preserves_stream_events_from_the_selected_provider() {
+    let registry = AdapterRegistry::new();
+    registry.register(Arc::new(LocalAdapter {
+        id: "second-test",
+        response: "second stream",
+    }));
+    let request = mock_adapter::request("second-test");
+
+    let events = registry
+        .stream(request)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        matches!(&events[..], [Ok(LlmEvent::TextDelta(text)), Ok(LlmEvent::Completed(_))] if text == "second stream")
+    );
+}
+
+#[test]
+fn registry_returns_provider_neutral_error_for_unknown_provider() {
+    let registry = AdapterRegistry::new();
+    let result = registry.adapter_for(&ModelSelector {
+        provider: "unknown-provider".to_owned(),
+        model: "model".to_owned(),
+        thinking_level: None,
+    });
+
+    assert!(matches!(result, Err(LlmError::Unsupported("provider"))));
 }

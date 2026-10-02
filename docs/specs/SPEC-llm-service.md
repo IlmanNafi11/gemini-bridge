@@ -148,7 +148,24 @@ impl ReloadableAdapter {
 pub trait LlmRouter: Send + Sync {
     fn adapter_for(&self, model: &ModelSelector) -> Result<Arc<dyn LlmAdapter>, LlmError>;
 }
+
+#[derive(Clone, Default)]
+pub struct AdapterRegistry;
+impl AdapterRegistry {
+    pub fn new() -> Self;
+    pub fn register(&self, adapter: Arc<dyn LlmAdapter>);
+}
+#[async_trait]
+impl LlmAdapter for AdapterRegistry {
+    async fn complete(&self, request: Arc<LlmRequest>) -> Result<Completion, LlmError>;
+    async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<serde_json::Value, LlmError>;
+    async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError>;
+}
 ```
+
+The composition root may register concrete provider adapters in `AdapterRegistry`
+and provide the registry through `PluginContext`; provider implementations remain
+outside `llm-service`.
 
 ---
 
@@ -170,7 +187,7 @@ pub trait LlmRouter: Send + Sync {
 2. A mock adapter returns a full `Completion` and an ordered stream of neutral text/tool/metadata/completion events through the same public contract used by production adapters.
 3. `LlmRouter` selects an adapter from `ModelSelector` and returns a stable provider-neutral error for an unknown or unavailable provider.
 4. Authentication, rate-limit, unavailability, unsupported-capability, and protocol failures can be represented without importing provider or HTTP error types.
-5. A second adapter can implement and register the contract without modifications to request/event core types or dependencies from `llm-service` back to either adapter.
+5. A second adapter can implement and register the contract without modifications to request/event core types or dependencies from `llm-service` back to either adapter; a normalized request is dispatched to it through the registry.
 
 ---
 

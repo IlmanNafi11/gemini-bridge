@@ -3,10 +3,10 @@
 //! This crate must not import Gemini, Axum, OpenAI-HTTP, or storage crates.
 
 use gemini_bridge_plugin_context::{PluginGeneration, ReloadableSlot};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
@@ -255,4 +255,77 @@ impl LlmAdapter for ReloadableAdapter {
 /// Selects the correct adapter for a given model selector.
 pub trait LlmRouter: Send + Sync {
     fn adapter_for(&self, model: &ModelSelector) -> Result<Arc<dyn LlmAdapter>, LlmError>;
+}
+
+/// Thread-safe registry that routes normalized requests to provider adapters.
+///
+/// The registry is intentionally keyed only by the neutral provider identifier;
+/// concrete adapters remain outside this crate and are supplied by the
+/// composition root.
+#[derive(Clone, Default)]
+pub struct AdapterRegistry {
+    adapters: Arc<RwLock<HashMap<&'static str, Arc<dyn LlmAdapter>>>>,
+}
+
+impl AdapterRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an adapter under its stable provider identifier.
+    ///
+    /// Re-registering a provider replaces the previous adapter, which keeps
+    /// instance replacement deterministic for composition and test setup.
+    pub fn register(&self, adapter: Arc<dyn LlmAdapter>) {
+        let provider_id = adapter.provider_id();
+        self.adapters
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider_id, adapter);
+    }
+
+    /// Return the adapter selected by a normalized model selector.
+    pub fn adapter_for_provider(
+        &self,
+        model: &ModelSelector,
+    ) -> Result<Arc<dyn LlmAdapter>, LlmError> {
+        self.adapters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(model.provider.as_str())
+            .cloned()
+            .ok_or(LlmError::Unsupported("provider"))
+    }
+}
+
+#[async_trait]
+impl LlmAdapter for AdapterRegistry {
+    fn provider_id(&self) -> &'static str {
+        "registry"
+    }
+
+    async fn complete(&self, request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        self.adapter_for_provider(&request.model)?
+            .complete(request)
+            .await
+    }
+
+    async fn complete_raw(&self, request: Arc<LlmRequest>) -> Result<serde_json::Value, LlmError> {
+        self.adapter_for_provider(&request.model)?
+            .complete_raw(request)
+            .await
+    }
+
+    async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        self.adapter_for_provider(&request.model)?
+            .stream(request)
+            .await
+    }
+}
+
+impl LlmRouter for AdapterRegistry {
+    fn adapter_for(&self, model: &ModelSelector) -> Result<Arc<dyn LlmAdapter>, LlmError> {
+        self.adapter_for_provider(model)
+    }
 }
