@@ -218,9 +218,9 @@
   - Files: `crates/llm-service/src/lib.rs`, `crates/llm-service/tests/mock_adapter.rs`, `crates/llm-service/tests/contract_test.rs`, `tests/multi_adapter_test.rs`
   - Depends on: 0.1, 0.5, 0.7
 
-- [ ] **Task 3.5: Add profiles/bundles/patch overlays**
+- [x] **Task 3.5: Add profiles/bundles/patch overlays**
   - Acceptance: Config composition supports approved profiles/bundles/patch overlays with deterministic precedence and rejects invalid combinations clearly.
-  - Verify: `cargo test -p gemini-bridge-config` covers precedence and invalid profile cases.
+  - Verify: `cargo test -p gemini-bridge-config` (20 passed); `cargo test --workspace` (385 passed); workspace fmt, clippy, and build pass.
   - Files: `crates/config/src/profiles.rs`, `crates/config/src/overlay.rs`, `crates/config/tests/profile_composition.rs`
   - Depends on: 0.2
 
