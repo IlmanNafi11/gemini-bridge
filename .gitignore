@@ -5,3 +5,5 @@
 .env.*
 !.env.example
 *.log
+*.sha256
+release/

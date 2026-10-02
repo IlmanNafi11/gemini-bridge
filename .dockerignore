@@ -1,0 +1,10 @@
+target
+.git
+.github
+.env
+.env.*
+bridge.toml
+*.log
+docs/
+tasks/
+tests/

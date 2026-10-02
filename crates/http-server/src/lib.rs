@@ -206,6 +206,25 @@ pub fn build_router(config: ServerConfig, state: AppState) -> Router {
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
 }
 
+/// Bind the configured address and serve requests until the process is stopped.
+pub async fn start_server(config: ServerConfig, state: AppState) -> Result<(), ServerError> {
+    if !config.bind_addr.ip().is_loopback() && config.api_key.is_none() {
+        return Err(ServerError::Bind(
+            "an API key is required when binding outside localhost".to_string(),
+        ));
+    }
+
+    let bind_addr = config.bind_addr;
+    let router = build_router(config, state);
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|error| ServerError::Bind(error.to_string()))?;
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|error| ServerError::Serve(error.to_string()))
+}
+
 // ── Authentication middleware ──────────────────────────────────────────────────
 
 async fn public_middleware(

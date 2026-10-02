@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Linux release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Build static release binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl --bin gemini-bridge
+
+      - name: Verify release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/x86_64-unknown-linux-musl/release/gemini-bridge"
+          file "$binary"
+          test "$(stat -c '%s' "$binary")" -le 26214400
+          if command -v strip >/dev/null 2>&1; then strip "$binary"; fi
+          size=$(stat -c '%s' "$binary")
+          echo "stripped binary size: ${size} bytes"
+          test "$size" -le 26214400
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME:-manual}"
+          staging="release/gemini-bridge-${version}-x86_64-unknown-linux-musl"
+          mkdir -p "$staging"
+          cp target/x86_64-unknown-linux-musl/release/gemini-bridge "$staging/"
+          cp README.md bridge.example.toml "$staging/"
+          cp -r docs "$staging/"
+          tar -C release -czf "${staging}.tar.gz" "$(basename "$staging")"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/*.tar.gz
+            release/*.sha256

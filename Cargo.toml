@@ -11,9 +11,21 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 gemini-bridge-config = { path = "crates/config" }
 gemini-bridge-identity = { path = "crates/identity" }
 gemini-bridge-http-server = { path = "crates/http-server" }
+gemini-bridge-transport = { path = "crates/transport" }
+gemini-bridge-llm-service = { path = "crates/llm-service" }
+gemini-bridge-media-store = { path = "crates/media-store" }
+gemini-bridge-upload = { path = "crates/upload" }
+gemini-bridge-image-gen = { path = "crates/image-gen" }
+gemini-bridge-conversation-store = { path = "crates/conversation-store" }
+gemini-bridge-health-admin = { path = "crates/health-admin" }
+gemini-bridge-gallery = { path = "crates/gallery" }
+gemini-bridge-tool-calling = { path = "crates/tool-calling" }
+gemini-bridge-adapter-video = { path = "crates/video-adapter" }
 
 [dev-dependencies]
 async-trait = { workspace = true }
@@ -99,5 +111,11 @@ tower = "0.5"
 tower-http = { version = "0.7", features = ["cors", "request-id", "trace"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

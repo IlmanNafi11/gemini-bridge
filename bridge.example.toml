@@ -1,0 +1,19 @@
+[server]
+bind_addr = "127.0.0.1"
+port = 8090
+# api_key = "replace-with-a-long-random-value"
+cors_enabled = false
+metrics_enabled = false
+
+[storage]
+# Defaults to $XDG_DATA_HOME/gemini-bridge or ~/.local/share/gemini-bridge.
+# data_dir = "/var/lib/gemini-bridge"
+media_ttl_days = 30
+
+[transport]
+tls_profile = "chrome"
+# proxy_url = "socks5://127.0.0.1:1080"
+timeout_secs = 30
+
+[video]
+enabled = false
