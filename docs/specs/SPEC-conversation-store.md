@@ -18,6 +18,7 @@ It enables client applications to maintain persistent multi-turn conversations, 
 **In scope:**
 - Embedded single-file SQLite database management with deterministic schema migrations.
 - Transactional persistence of `Conversation` metadata, including mapping to Gemini upstream IDs (`conversationId`, `responseId`, `candidateId`).
+- On Unix, standalone database opens use a private (`0700`) parent only when creating a new data directory, while existing caller-owned parent modes remain unchanged; database and SQLite sidecar files use `0600`.
 - Append-only message history persistence with ordered sequence index and timestamping.
 - Branch creation (`POST /v1/conversations/{id}/branch`) yielding a new child conversation that inherits ancestor message history up to a specified message point.
 - Querying paginated conversation lists and ordered message history for a given conversation.
@@ -289,6 +290,7 @@ ON conversations(updated_at DESC);
 6. **Error Condition Tests:**
    - `get_conversation` on a non-existent ID returns `ConversationStoreError::NotFound`.
    - `branch_from` with a message ID that is missing or belongs to another conversation returns `ConversationStoreError::InvalidBranchPoint`.
+7. **Filesystem Privacy (Unix):** Opening a database in an existing `0755` parent does not change the parent mode; database and existing SQLite sidecar files are secured to `0600`. A newly created parent is `0700`.
 
 ---
 ## 7. Boundaries

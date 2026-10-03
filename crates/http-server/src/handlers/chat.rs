@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 
 use gemini_bridge_code_exec::extract_from_value;
-use gemini_bridge_conversation_store::{ConversationStore, ConversationStoreError, StoredMessage};
+use gemini_bridge_conversation_store::{ConversationStoreError, StoredMessage, Turn};
 use gemini_bridge_llm_service::{
     Completion, ContentPart, LlmError, LlmEvent, LlmRequest, Message, ModelSelector, Role,
     ToolResult,
@@ -258,17 +258,21 @@ async fn non_stream_response(
         Err(error) => return map_llm_error(error).into_response(),
     };
 
-    // Persist messages if conversation store is active.
+    // Persist the complete turn before reporting upstream success.
+
     if let Some(context) = &continuation
         && let Some(store) = &state.conversation_store
     {
-        let _ = persist_turn(
-            store.as_ref(),
-            &context.conversation_id,
-            &request_messages,
-            &completion,
-        )
-        .await;
+        let turn =
+            match turn_from_completion(&context.conversation_id, &request_messages, &completion) {
+                Ok(turn) => turn,
+                Err(error) => {
+                    return persistence_error_response(error, &context.conversation_id);
+                }
+            };
+        if let Err(error) = store.persist_turn(turn).await {
+            return persistence_error_response(error, &context.conversation_id);
+        }
     }
 
     let usage = completion.usage.map(|u| UsageInfo {
@@ -512,61 +516,73 @@ fn stored_to_message(message: &StoredMessage) -> Message {
     }
 }
 
-async fn persist_turn(
-    store: &dyn ConversationStore,
+fn turn_from_completion(
     conversation_id: &str,
     request_messages: &[Message],
     completion: &Completion,
-) -> Result<(), ConversationStoreError> {
-    let history = store.get_history(conversation_id).await?;
-    let mut sequence_number = history.last().map_or(1, |m| m.sequence_number + 1);
-    let ids = completion.metadata.as_ref().map(|metadata| &metadata.raw);
-    let upstream_conversation_id = ids
-        .and_then(|raw| raw.get("conversation_id"))
-        .and_then(|value| value.as_str());
-    let upstream_response_id = ids
-        .and_then(|raw| raw.get("response_id"))
-        .and_then(|value| value.as_str());
-    let upstream_candidate_id = ids
-        .and_then(|raw| raw.get("candidate_id"))
-        .and_then(|value| value.as_str());
-
-    for message in request_messages {
-        let (role, content_json) = message_to_stored(message);
-        store
-            .append_message(StoredMessage {
+) -> Result<Turn, ConversationStoreError> {
+    let request_messages = request_messages
+        .iter()
+        .map(|message| {
+            let (role, content_json) = message_to_stored(message)?;
+            Ok(StoredMessage {
                 id: uuid::Uuid::new_v4().to_string(),
                 conversation_id: conversation_id.to_owned(),
                 parent_message_id: None,
                 role,
                 content_json,
-                sequence_number,
+                sequence_number: 0,
                 created_at: unix_now(),
                 upstream_conversation_id: None,
                 upstream_response_id: None,
                 upstream_candidate_id: None,
             })
-            .await?;
-        sequence_number += 1;
-    }
-
-    store
-        .append_message(StoredMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            conversation_id: conversation_id.to_owned(),
-            parent_message_id: None,
-            role: "assistant".to_owned(),
-            content_json: serde_json::to_string(&completion.text)?,
-            sequence_number,
-            created_at: unix_now(),
-            upstream_conversation_id: upstream_conversation_id.map(str::to_owned),
-            upstream_response_id: upstream_response_id.map(str::to_owned),
-            upstream_candidate_id: upstream_candidate_id.map(str::to_owned),
         })
-        .await
+        .collect::<Result<Vec<_>, ConversationStoreError>>()?;
+
+    let ids = completion.metadata.as_ref().map(|metadata| &metadata.raw);
+    let response = StoredMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.to_owned(),
+        parent_message_id: None,
+        role: "assistant".to_owned(),
+        content_json: serde_json::to_string(&completion.text)?,
+        sequence_number: 0,
+        created_at: unix_now(),
+        upstream_conversation_id: ids
+            .and_then(|raw| raw.get("conversation_id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        upstream_response_id: ids
+            .and_then(|raw| raw.get("response_id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        upstream_candidate_id: ids
+            .and_then(|raw| raw.get("candidate_id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+    };
+
+    Ok(Turn {
+        conversation_id: conversation_id.to_owned(),
+        request_messages,
+        response,
+    })
 }
 
-fn message_to_stored(message: &Message) -> (String, String) {
+fn persistence_error_response(error: ConversationStoreError, conversation_id: &str) -> Response {
+    tracing::error!(%error, %conversation_id, "failed to persist conversation turn");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(OpenAiErrorResponse::new(
+            "Conversation turn could not be persisted",
+            "internal_error",
+        )),
+    )
+        .into_response()
+}
+
+fn message_to_stored(message: &Message) -> Result<(String, String), serde_json::Error> {
     let role = match message.role {
         Role::System => "system",
         Role::User => "user",
@@ -582,10 +598,7 @@ fn message_to_stored(message: &Message) -> (String, String) {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    (
-        role.to_owned(),
-        serde_json::to_string(&content).unwrap_or_default(),
-    )
+    Ok((role.to_owned(), serde_json::to_string(&content)?))
 }
 
 // ── Streaming SSE path ────────────────────────────────────────────────────────
@@ -603,62 +616,93 @@ async fn stream_response(
     let completion_id = new_completion_id();
     let created = unix_now();
 
-    // Translate each LlmEvent into an SSE `Event`.
-    let sse_stream = event_stream.map(move |ev| -> Result<Event, Infallible> {
-        let data = match ev {
-            Ok(LlmEvent::TextDelta(text)) => {
-                let chunk = ChatCompletionChunk {
-                    id: completion_id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model_name.clone(),
-                    choices: vec![ChatChoiceDelta {
-                        index: 0,
-                        delta: DeltaContent {
-                            role: None,
-                            content: Some(text),
-                        },
-                        finish_reason: None,
-                    }],
-                    gemini_metadata: None,
+    // Translate each LlmEvent into an SSE `Event`. The stream is error-aware:
+    // an upstream failure is emitted as a final JSON data event serialized with
+    // serde_json (never string formatting) and then the stream ends without the
+    // `[DONE]` sentinel. `[DONE]` is appended only after a clean end.
+    let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed_sink = failed.clone();
+    let id = completion_id;
+    let model = model_name;
+    let sse_stream = futures::stream::unfold(
+        (Some(event_stream), id, model),
+        move |(mut source, id, model)| {
+            let failed_sink = failed_sink.clone();
+            async move {
+                let event = source.as_mut()?.next().await?;
+                let (data, terminate) = match event {
+                    Ok(LlmEvent::TextDelta(text)) => {
+                        let chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChatChoiceDelta {
+                                index: 0,
+                                delta: DeltaContent {
+                                    role: None,
+                                    content: Some(text),
+                                },
+                                finish_reason: None,
+                            }],
+                            gemini_metadata: None,
+                        };
+                        (serde_json::to_string(&chunk).unwrap_or_default(), false)
+                    }
+                    Ok(LlmEvent::Completed(summary)) => {
+                        let chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChatChoiceDelta {
+                                index: 0,
+                                delta: DeltaContent {
+                                    role: None,
+                                    content: None,
+                                },
+                                finish_reason: Some(summary.finish_reason),
+                            }],
+                            gemini_metadata: summary
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| extract_from_value(&metadata.raw))
+                                .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                        };
+                        (serde_json::to_string(&chunk).unwrap_or_default(), false)
+                    }
+                    Ok(_) => (String::new(), false),
+                    Err(error) => {
+                        failed_sink.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let payload = serde_json::json!({ "error": error.to_string() });
+                        (serde_json::to_string(&payload).unwrap_or_default(), true)
+                    }
                 };
-                serde_json::to_string(&chunk).unwrap_or_default()
-            }
-            Ok(LlmEvent::Completed(summary)) => {
-                let chunk = ChatCompletionChunk {
-                    id: completion_id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model_name.clone(),
-                    choices: vec![ChatChoiceDelta {
-                        index: 0,
-                        delta: DeltaContent {
-                            role: None,
-                            content: None,
-                        },
-                        finish_reason: Some(summary.finish_reason),
-                    }],
-                    gemini_metadata: summary
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| extract_from_value(&metadata.raw))
-                        .and_then(|metadata| serde_json::to_value(metadata).ok()),
+                if terminate {
+                    source = None;
+                }
+                let event = if data.is_empty() {
+                    Event::default().comment("skip")
+                } else {
+                    Event::default().data(data)
                 };
-                serde_json::to_string(&chunk).unwrap_or_default()
+                Some((Ok::<_, Infallible>(event), (source, id, model)))
             }
-            Ok(_) => return Ok(Event::default().comment("skip")),
-            Err(err) => {
-                // Surface provider errors as a final data event before close.
-                let msg = format!("{{\"error\":\"{}\"}}", err);
-                return Ok(Event::default().data(msg));
-            }
-        };
-        Ok(Event::default().data(data))
-    });
+        },
+    );
 
-    // Append the `[DONE]` sentinel required by the OpenAI SSE protocol.
-    let done =
-        futures::stream::once(async { Ok::<_, Infallible>(Event::default().data("[DONE]")) });
+    // OpenAI's terminal `[DONE]` sentinel is appended only after a clean end;
+    // a failed stream ends immediately after its error event without `[DONE]`.
+    let done = futures::stream::iter([()]).filter_map(move |_| {
+        let failed = failed.clone();
+        async move {
+            if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                None
+            } else {
+                Some(Ok::<_, Infallible>(Event::default().data("[DONE]")))
+            }
+        }
+    });
     let combined = sse_stream.chain(done);
 
     Sse::new(combined)

@@ -69,7 +69,7 @@ pub trait IdentityService: Send + Sync {
 ## 3. Behavior & Invariants
 
 1. **Credential Import:** Credentials are accepted only through explicit local CLI/admin flow and validated by an authenticated bootstrap; raw cookie strings are never echoed.
-2. **Secure Storage:** Credential files are created with owner-only (`0600`) permissions. When `BRIDGE_SECRET` encryption is enabled, incorrect/missing decryption key fails closed; it must not silently rewrite encrypted data as plaintext.
+2. **Secure Storage:** Credential files are created with owner-only (`0600`) permissions. When `BRIDGE_SECRET` encryption is enabled, incorrect/missing decryption key fails closed; it must not silently rewrite encrypted data as plaintext. Encrypted legacy ciphertext is exposed only after a durable re-encryption succeeds; a failed rewrap fails closed and preserves the original ciphertext. No caller-owned parent directory is altered.
 3. **Bootstrap:** Authenticated `GET /app` extracts current required protocol values; HTML changes produce a typed missing-field error and readiness degradation, not a panic.
 4. **Refresh:** Fase 1 rotation is bounded and single-flight so simultaneous requests do not trigger uncontrolled parallel refreshes. Refresh failure transitions to `NeedsReauth` and is visible via readiness/admin status.
 5. **Flag Detection:** A redirect to the upstream `sorry/index` path transitions to `IpFlagged`; do not retry blindly.

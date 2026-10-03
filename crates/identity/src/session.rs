@@ -23,8 +23,30 @@ pub trait IdentityService: Send + Sync {
     async fn snapshot(&self) -> SessionSnapshot;
     /// Apply authenticated Gemini session headers without exposing credential values.
     fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError>;
-    /// Import raw cookie header string, parse, validate and persist credentials.
+    /// Import raw cookie header string, parse and persist credentials without
+    /// probing upstream.
+    ///
+    /// Legacy entry point retained for providers and tests without a transport;
+    /// it does not establish that the credentials are accepted upstream. The
+    /// guided re-authentication flow should use
+    /// [`IdentityService::import_credentials_validated`].
     async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError>;
+    async fn validate_candidate(
+        &self,
+        _raw_cookie_header: &str,
+    ) -> Result<SessionBootstrap, IdentityError> {
+        Err(IdentityError::CandidateValidationUnsupported)
+    }
+    /// Probe candidate credentials, then atomically replace the persisted and
+    /// live credentials only after the probe succeeds. Failure leaves both the
+    /// previous credential states unchanged. On success, returns bootstrap
+    /// tokens extracted during the candidate probe.
+    async fn import_credentials_validated(
+        &self,
+        _raw_cookie_header: &str,
+    ) -> Result<SessionBootstrap, IdentityError> {
+        Err(IdentityError::CandidateValidationUnsupported)
+    }
 }
 
 /// Inner mutable state of the identity service.
@@ -60,6 +82,7 @@ impl DefaultIdentityService {
         config: &BridgeConfig,
         base_url: Option<String>,
     ) -> Result<Self, IdentityError> {
+        crate::crypto::validate_bridge_secret()?;
         let transport =
             ReqwestTransport::new(&config.transport).map_err(|_| IdentityError::Transport)?;
         let storage_cfg = config.storage.clone();
@@ -86,74 +109,50 @@ impl DefaultIdentityService {
             rotation_lock: tokio::sync::Mutex::new(()),
         })
     }
+    /// Persist credentials to disk, then install them into live state.
+    fn persist_and_install(&self, credentials: SessionCredentials) -> Result<(), IdentityError> {
+        let json = serde_json::to_string(&credentials).map_err(|_| IdentityError::Storage)?;
+        storage::write_cookies(&self.storage_cfg.data_dir, &json)?;
+        let mut state = self.state.lock();
+        state.credentials = Some(credentials);
+        state.status = SessionStatus::Stale;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl IdentityService for DefaultIdentityService {
     async fn bootstrap(&self) -> Result<SessionBootstrap, IdentityError> {
-        let base = self
-            .base_url
-            .as_deref()
-            .unwrap_or("https://gemini.google.com");
-        let url = Url::parse(&format!("{base}/app")).map_err(|_| IdentityError::Transport)?;
-
-        let mut headers = HeaderMap::new();
-        self.apply_auth_headers(&mut headers)?;
-        let req = TransportRequest {
-            method: Method::GET,
-            url,
-            headers,
-            body: None,
-            idempotency: Idempotency::SafeToRetry,
+        let credentials = {
+            self.state
+                .lock()
+                .credentials
+                .clone()
+                .ok_or(IdentityError::MissingCredentials)?
         };
-
-        let resp = self
-            .transport
-            .execute(req)
-            .await
-            .map_err(|_| IdentityError::Transport)?;
-
-        // Detect IP-flagging redirect to sorry page.
-        if resp.status.as_u16() == 302 || resp.status.as_u16() == 301 {
-            let loc = resp
-                .headers
-                .get(http::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if loc.contains("sorry") {
-                let mut st = self.state.lock();
-                st.status = SessionStatus::IpFlagged;
-                return Err(IdentityError::IpFlagged);
+        let result =
+            probe_credentials(&self.transport, self.base_url.as_deref(), &credentials).await;
+        match result {
+            Ok(bootstrap) => {
+                let mut state = self.state.lock();
+                state.status = SessionStatus::Valid;
+                state.last_bootstrap = Some(SessionBootstrap {
+                    bl: bootstrap.bl.clone(),
+                    snlm0e: bootstrap.snlm0e.clone(),
+                    fsid: bootstrap.fsid.clone(),
+                });
+                Ok(bootstrap)
+            }
+            Err(error) => {
+                let mut state = self.state.lock();
+                state.status = if matches!(error, IdentityError::IpFlagged) {
+                    SessionStatus::IpFlagged
+                } else {
+                    SessionStatus::NeedsReauth
+                };
+                Err(error)
             }
         }
-
-        if !resp.status.is_success() {
-            let mut st = self.state.lock();
-            st.status = SessionStatus::NeedsReauth;
-            return Err(IdentityError::NeedsReauth);
-        }
-
-        let html = String::from_utf8_lossy(&resp.body);
-
-        let bl = parser::extract_bl(&html).ok_or(IdentityError::MissingBootstrapField("bl"))?;
-        let snlm0e =
-            parser::extract_snlm0e(&html).ok_or(IdentityError::MissingBootstrapField("SNlM0e"))?;
-        let fsid =
-            parser::extract_fsid(&html).ok_or(IdentityError::MissingBootstrapField("f.sid"))?;
-
-        let bootstrap = SessionBootstrap {
-            bl: bl.clone(),
-            snlm0e: snlm0e.clone(),
-            fsid: fsid.clone(),
-        };
-
-        {
-            let mut st = self.state.lock();
-            st.status = SessionStatus::Valid;
-            st.last_bootstrap = Some(SessionBootstrap { bl, snlm0e, fsid });
-        }
-
-        Ok(bootstrap)
     }
 
     async fn refresh_1psidts(&self) -> Result<(), IdentityError> {
@@ -260,17 +259,112 @@ impl IdentityService for DefaultIdentityService {
     }
 
     async fn import_credentials(&self, raw_cookie_header: &str) -> Result<(), IdentityError> {
-        let creds =
+        let credentials =
             parse_cookie_header(raw_cookie_header).ok_or(IdentityError::MissingCredentials)?;
-        storage::write_cookies(
-            &self.storage_cfg.data_dir,
-            &serde_json::to_string(&creds).map_err(|_| IdentityError::Storage)?,
-        )?;
-        let mut st = self.state.lock();
-        st.credentials = Some(creds);
-        st.status = SessionStatus::Stale;
-        Ok(())
+        self.persist_and_install(credentials)
     }
+    async fn validate_candidate(
+        &self,
+        raw_cookie_header: &str,
+    ) -> Result<SessionBootstrap, IdentityError> {
+        let candidate =
+            parse_cookie_header(raw_cookie_header).ok_or(IdentityError::MissingCredentials)?;
+        probe_credentials(&self.transport, self.base_url.as_deref(), &candidate).await
+    }
+
+    async fn import_credentials_validated(
+        &self,
+        raw_cookie_header: &str,
+    ) -> Result<SessionBootstrap, IdentityError> {
+        let _guard = self.rotation_lock.lock().await;
+        let candidate =
+            parse_cookie_header(raw_cookie_header).ok_or(IdentityError::MissingCredentials)?;
+        let bootstrap =
+            probe_credentials(&self.transport, self.base_url.as_deref(), &candidate).await?;
+
+        // Only after upstream accepts the candidate do we touch disk or live
+        // state; both stay untouched when the probe fails.
+        self.persist_and_install(candidate)?;
+        let mut state = self.state.lock();
+        state.last_bootstrap = Some(SessionBootstrap {
+            bl: bootstrap.bl.clone(),
+            snlm0e: bootstrap.snlm0e.clone(),
+            fsid: bootstrap.fsid.clone(),
+        });
+        state.status = SessionStatus::Valid;
+        state.refresh_epoch += 1;
+        Ok(bootstrap)
+    }
+}
+/// Probe a candidate session without mutating the service's live state.
+async fn probe_credentials(
+    transport: &ReqwestTransport,
+    base_url: Option<&str>,
+    credentials: &SessionCredentials,
+) -> Result<SessionBootstrap, IdentityError> {
+    let base = base_url.unwrap_or("https://gemini.google.com");
+    let url = Url::parse(&format!("{base}/app")).map_err(|_| IdentityError::Transport)?;
+    let mut headers = HeaderMap::new();
+    insert_auth_headers(&mut headers, credentials)?;
+    let response = transport
+        .execute(TransportRequest {
+            method: Method::GET,
+            url,
+            headers,
+            body: None,
+            idempotency: Idempotency::SafeToRetry,
+        })
+        .await
+        .map_err(|_| IdentityError::Transport)?;
+
+    if response.status.as_u16() == 301 || response.status.as_u16() == 302 {
+        let location = response
+            .headers
+            .get(http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        if location.contains("sorry") {
+            return Err(IdentityError::IpFlagged);
+        }
+    }
+    if !response.status.is_success() {
+        return Err(IdentityError::NeedsReauth);
+    }
+    let html = String::from_utf8_lossy(&response.body);
+    Ok(SessionBootstrap {
+        bl: parser::extract_bl(&html).ok_or(IdentityError::MissingBootstrapField("bl"))?,
+        snlm0e: parser::extract_snlm0e(&html)
+            .ok_or(IdentityError::MissingBootstrapField("SNlM0e"))?,
+        fsid: parser::extract_fsid(&html).ok_or(IdentityError::MissingBootstrapField("f.sid"))?,
+    })
+}
+
+fn insert_auth_headers(
+    headers: &mut HeaderMap,
+    credentials: &SessionCredentials,
+) -> Result<(), IdentityError> {
+    headers.insert(
+        http::header::COOKIE,
+        format!(
+            "__Secure-1PSID={}; __Secure-1PSIDTS={}; SAPISID={}",
+            credentials.psid, credentials.psidts, credentials.sapisid
+        )
+        .parse()
+        .map_err(|_| IdentityError::Transport)?,
+    );
+    headers.insert(
+        http::header::AUTHORIZATION,
+        parser::build_sapisidhash(&credentials.sapisid)
+            .parse()
+            .map_err(|_| IdentityError::Transport)?,
+    );
+    headers.insert(
+        http::header::USER_AGENT,
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            .parse()
+            .map_err(|_| IdentityError::Transport)?,
+    );
+    Ok(())
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -305,8 +399,8 @@ fn parse_cookie_header(raw: &str) -> Option<SessionCredentials> {
     })
 }
 
-/// Load credentials from disk. Silently returns `None` on any error to allow
-/// graceful startup without credentials.
+/// Load credentials from disk. Storage, decryption, parsing, and legacy
+/// rewrap failures propagate so startup cannot silently use stale credentials.
 fn load_credentials(cfg: &StorageConfig) -> Result<Option<SessionCredentials>, IdentityError> {
     match storage::read_cookies(&cfg.data_dir)? {
         None => Ok(None),

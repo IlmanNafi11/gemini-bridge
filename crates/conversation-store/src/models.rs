@@ -45,3 +45,18 @@ pub struct StoredMessage {
     pub upstream_response_id: Option<String>,
     pub upstream_candidate_id: Option<String>,
 }
+
+/// All durable records produced by one successful upstream completion.
+///
+/// Sequence numbers on the supplied messages are ignored: the store allocates
+/// one contiguous range while holding the SQLite write transaction. The
+/// response carries the upstream identifiers returned for the completed turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    /// Conversation receiving the complete turn.
+    pub conversation_id: String,
+    /// Request messages sent to the provider, in wire order.
+    pub request_messages: Vec<StoredMessage>,
+    /// Assistant response and its upstream identifier snapshot.
+    pub response: StoredMessage,
+}

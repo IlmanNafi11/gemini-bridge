@@ -1,7 +1,14 @@
-use std::sync::Mutex;
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
+
+use aes_gcm::{
+    Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit},
+};
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
-use gemini_bridge_identity::crypto::{decrypt, derive_key, encrypt};
+use gemini_bridge_identity::crypto::{decrypt, encrypt, validate_bridge_secret};
 use gemini_bridge_identity::parser::{
     compute_sapisidhash, extract_bl, extract_fsid, extract_snlm0e,
 };
@@ -107,114 +114,254 @@ fn test_parser_missing_fields_return_none() {
 
 // ─── 2. Crypto Tests ─────────────────────────────────────────────────────────
 
-// Serial lock for environment variable modifications
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+// Serial lock for environment variable modifications. Tests that construct an
+// identity service also take this lock because startup validates BRIDGE_SECRET.
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+const STRONG_SECRET_A: &str = "correct-horse-battery-staple-bridge-A";
+const STRONG_SECRET_B: &str = "correct-horse-battery-staple-bridge-B";
 
 #[test]
-fn test_crypto_round_trip_with_secret() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    // Safety: only one test touches BRIDGE_SECRET at a time via ENV_LOCK
-    unsafe { std::env::set_var("BRIDGE_SECRET", "super-secret-key-12345") };
+fn test_crypto_round_trip_uses_versioned_salted_kdf_envelope() {
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
 
     let plaintext = b"{\"psid\":\"foo\",\"psidts\":\"bar\",\"sapisid\":\"baz\"}";
-    let ciphertext = encrypt(plaintext).expect("encryption succeeds with key");
-    assert_ne!(&ciphertext[..], plaintext);
+    let first = encrypt(plaintext).unwrap().expect("encryption enabled");
+    let second = encrypt(plaintext).unwrap().expect("encryption enabled");
 
-    let decrypted = decrypt(&ciphertext).expect("decryption succeeds with same key");
-    assert_eq!(decrypted, plaintext);
-
-    unsafe { std::env::remove_var("BRIDGE_SECRET") };
-}
-
-#[test]
-fn test_crypto_fails_with_wrong_key() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("BRIDGE_SECRET", "secret-key-A") };
-    let plaintext = b"sensitive-data";
-    let ciphertext = encrypt(plaintext).unwrap();
-
-    // Switch key
-    unsafe { std::env::set_var("BRIDGE_SECRET", "secret-key-B") };
-    let result = decrypt(&ciphertext);
-    assert!(result.is_none(), "decryption with wrong key must fail");
+    assert!(
+        first.starts_with(b"GBCK"),
+        "new ciphertext must be versioned"
+    );
+    assert_ne!(
+        first, second,
+        "each encryption must use a fresh salt and nonce"
+    );
+    assert_eq!(decrypt(&first).unwrap(), plaintext);
+    assert_eq!(decrypt(&second).unwrap(), plaintext);
 
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
 }
 
 #[test]
-fn test_crypto_noop_when_secret_unset() {
-    let _guard = ENV_LOCK.lock().unwrap();
+fn test_crypto_fails_with_wrong_key_without_disclosing_secrets() {
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
+    let ciphertext = encrypt(b"sensitive-data").unwrap().unwrap();
+
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_B) };
+    let error = decrypt(&ciphertext).unwrap_err();
+    let rendered = format!("{error:?}: {error}");
+    assert!(!rendered.contains(STRONG_SECRET_A));
+    assert!(!rendered.contains(STRONG_SECRET_B));
+    assert!(!rendered.contains("sensitive-data"));
+
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
-    assert!(derive_key().is_none());
-    assert!(encrypt(b"hello").is_none());
+}
+
+#[test]
+fn test_crypto_rejects_empty_short_and_low_diversity_secrets_actionably() {
+    let _guard = ENV_LOCK.blocking_lock();
+    for weak in ["", "too-short", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] {
+        unsafe { std::env::set_var("BRIDGE_SECRET", weak) };
+        let error = validate_bridge_secret().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("BRIDGE_SECRET"));
+        assert!(message.contains("32 bytes"));
+        assert!(!message.contains(weak) || weak.is_empty());
+    }
+
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+    assert!(
+        !validate_bridge_secret().unwrap(),
+        "unset secret keeps optional plaintext mode"
+    );
+}
+#[test]
+fn identity_service_rejects_weak_bridge_secret_without_cookie_file() {
+    use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
+    use gemini_bridge_identity::{DefaultIdentityService, IdentityError};
+
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", "weak") };
+    let dir = tempdir().unwrap();
+    let config = BridgeConfig {
+        server: ServerConfig::default(),
+        storage: StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            media_ttl_days: 30,
+        },
+        transport: TransportConfig {
+            tls_profile: "chrome".into(),
+            proxy_url: None,
+            timeout_secs: 5,
+        },
+        video: Default::default(),
+    };
+
+    let error = DefaultIdentityService::new(&config).err().unwrap();
+    assert!(matches!(error, IdentityError::WeakBridgeSecret));
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
 }
 
 // ─── 3. Storage Tests ─────────────────────────────────────────────────────────
 
 #[test]
-fn test_storage_plaintext_round_trip() {
-    let _guard = ENV_LOCK.lock().unwrap();
+fn test_storage_plaintext_round_trip_when_secret_is_unset() {
+    let _guard = ENV_LOCK.blocking_lock();
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
 
     let dir = tempdir().unwrap();
     let json = r#"{"psid":"test_psid","psidts":"test_psidts","sapisid":"test_sapisid","imported_at":"2024-01-01T00:00:00Z"}"#;
-
     write_cookies(dir.path(), json).expect("write cookies");
-    let read_back = read_cookies(dir.path()).expect("read cookies");
-    assert_eq!(read_back.as_deref(), Some(json));
+    assert_eq!(read_cookies(dir.path()).unwrap().as_deref(), Some(json));
 }
 
 #[test]
 fn test_storage_encrypted_round_trip() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("BRIDGE_SECRET", "my-encryption-password") };
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
 
     let dir = tempdir().unwrap();
     let json = r#"{"psid":"secure_psid","psidts":"secure_psidts","sapisid":"secure_sapisid","imported_at":"2024-01-01T00:00:00Z"}"#;
-
     write_cookies(dir.path(), json).expect("write encrypted cookies");
 
-    // The file on disk should NOT be plaintext
     let raw_bytes = std::fs::read(dir.path().join("cookies.json")).unwrap();
+    assert!(raw_bytes.starts_with(b"GBCK"));
     assert_ne!(raw_bytes, json.as_bytes());
-
-    let read_back = read_cookies(dir.path()).expect("read decrypted cookies");
-    assert_eq!(read_back.as_deref(), Some(json));
+    assert_eq!(read_cookies(dir.path()).unwrap().as_deref(), Some(json));
 
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
 }
 
 #[test]
 fn test_storage_encrypted_fails_with_wrong_key() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    unsafe { std::env::set_var("BRIDGE_SECRET", "correct-key") };
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
 
     let dir = tempdir().unwrap();
-    let json = r#"{"psid":"a","psidts":"b","sapisid":"c","imported_at":"2024-01-01T00:00:00Z"}"#;
-    write_cookies(dir.path(), json).expect("write cookies");
+    write_cookies(dir.path(), r#"{"psid":"a"}"#).unwrap();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_B) };
+    assert!(
+        read_cookies(dir.path()).is_err(),
+        "wrong key must fail closed"
+    );
 
-    // Switch key and attempt read
-    unsafe { std::env::set_var("BRIDGE_SECRET", "wrong-key") };
-    let result = read_cookies(dir.path());
-    assert!(result.is_err(), "reading with wrong key must fail closed");
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+}
 
+#[test]
+fn test_storage_reads_and_migrates_legacy_sha256_ciphertext() {
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
+
+    let dir = tempdir().unwrap();
+    let json = r#"{"psid":"legacy","psidts":"old","sapisid":"cookie","imported_at":"2024-01-01T00:00:00Z"}"#;
+    let key_bytes = Sha256::digest(STRONG_SECRET_A.as_bytes());
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let nonce_bytes = [7_u8; 12];
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), json.as_bytes())
+        .unwrap();
+    let mut legacy = nonce_bytes.to_vec();
+    legacy.extend_from_slice(&ciphertext);
+    std::fs::write(dir.path().join("cookies.json"), &legacy).unwrap();
+
+    assert_eq!(read_cookies(dir.path()).unwrap().as_deref(), Some(json));
+    let migrated = std::fs::read(dir.path().join("cookies.json")).unwrap();
+    assert!(migrated.starts_with(b"GBCK"));
+    assert_ne!(migrated, legacy);
+
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+}
+#[cfg(unix)]
+#[test]
+fn test_legacy_rewrap_failure_preserves_ciphertext_and_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::set_var("BRIDGE_SECRET", STRONG_SECRET_A) };
+
+    let dir = tempdir().unwrap();
+    let json = r#"{"psid":"legacy secret","psidts":"old","sapisid":"cookie","imported_at":"2024-01-01T00:00:00Z"}"#;
+    let key_bytes = Sha256::digest(STRONG_SECRET_A.as_bytes());
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let nonce_bytes = [7_u8; 12];
+    let encrypted = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), json.as_bytes())
+        .unwrap();
+    let mut legacy = nonce_bytes.to_vec();
+    legacy.extend_from_slice(&encrypted);
+    let path = dir.path().join("cookies.json");
+    std::fs::write(&path, &legacy).unwrap();
+
+    // Root can bypass mode bits, so skip only when a write probe confirms this
+    // environment does not enforce a read-only directory.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.path().join("permission-probe"))
+        .is_ok()
+    {
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        unsafe { std::env::remove_var("BRIDGE_SECRET") };
+        return;
+    }
+
+    let error = read_cookies(dir.path()).expect_err("failed legacy rewrap must fail closed");
+    assert!(matches!(
+        &error,
+        gemini_bridge_identity::IdentityError::LegacyCredentialRewrap
+    ));
+    let rendered = format!("{error:?}: {error}");
+    assert!(!rendered.contains(STRONG_SECRET_A));
+    assert!(!rendered.contains("legacy secret"));
+    assert_eq!(std::fs::read(path).unwrap(), legacy);
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+}
+
+#[test]
+fn test_failed_write_preserves_existing_file() {
+    let _guard = ENV_LOCK.blocking_lock();
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+    let dir = tempdir().unwrap();
+    write_cookies(dir.path(), "old credentials").unwrap();
+    let before = std::fs::read(dir.path().join("cookies.json")).unwrap();
+
+    unsafe { std::env::set_var("BRIDGE_SECRET", "weak") };
+    assert!(write_cookies(dir.path(), "replacement credentials").is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("cookies.json")).unwrap(),
+        before
+    );
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
 }
 
 #[cfg(unix)]
 #[test]
-fn test_storage_creates_file_with_0600_mode() {
-    use std::os::unix::fs::PermissionsExt;
+fn test_storage_atomically_replaces_file_with_0600_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     unsafe { std::env::remove_var("BRIDGE_SECRET") };
-
     let dir = tempdir().unwrap();
-    write_cookies(dir.path(), "{}").unwrap();
+    write_cookies(dir.path(), "first").unwrap();
+    let path = dir.path().join("cookies.json");
+    let first_inode = std::fs::metadata(&path).unwrap().ino();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-    let meta = std::fs::metadata(dir.path().join("cookies.json")).unwrap();
-    let mode = meta.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "cookies.json must have 0600 mode on Unix");
+    write_cookies(dir.path(), "second").unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_ne!(
+        metadata.ino(),
+        first_inode,
+        "replacement must use rename, not in-place truncation"
+    );
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "second");
 }
 
 // ─── 4. Redaction Tests ───────────────────────────────────────────────────────
@@ -247,6 +394,150 @@ fn test_bootstrap_debug_is_redacted() {
     assert!(!debug_str.contains("secret_fsid"));
     assert!(debug_str.contains("<redacted>"));
 }
+#[tokio::test]
+async fn failed_candidate_validation_preserves_disk_and_live_credentials() {
+    use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
+    use gemini_bridge_identity::{DefaultIdentityService, IdentityService};
+    use http::HeaderMap;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _guard = ENV_LOCK.lock().await;
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    let config = BridgeConfig {
+        server: ServerConfig {
+            bind_addr: "127.0.0.1".into(),
+            port: 8090,
+            api_key: None,
+            cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
+            metrics_enabled: false,
+        },
+        storage: StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            media_ttl_days: 30,
+        },
+        transport: TransportConfig {
+            tls_profile: "chrome".into(),
+            proxy_url: None,
+            timeout_secs: 5,
+        },
+        video: Default::default(),
+    };
+    let service = DefaultIdentityService::with_base_url(&config, Some(server.uri())).unwrap();
+    service
+        .import_credentials("__Secure-1PSID=old_psid; __Secure-1PSIDTS=old_ts; SAPISID=old_sapisid")
+        .await
+        .unwrap();
+    let disk_before = std::fs::read(dir.path().join("cookies.json")).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .and(header(
+            "cookie",
+            "__Secure-1PSID=bad_psid; __Secure-1PSIDTS=bad_ts; SAPISID=bad_sapisid",
+        ))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = service
+        .import_credentials_validated(
+            "__Secure-1PSID=bad_psid; __Secure-1PSIDTS=bad_ts; SAPISID=bad_sapisid",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        gemini_bridge_identity::IdentityError::NeedsReauth
+    ));
+    assert_eq!(
+        std::fs::read(dir.path().join("cookies.json")).unwrap(),
+        disk_before
+    );
+
+    let mut headers = HeaderMap::new();
+    service.apply_auth_headers(&mut headers).unwrap();
+    let cookie = headers.get(http::header::COOKIE).unwrap().to_str().unwrap();
+    assert!(cookie.contains("old_psid"));
+    assert!(!cookie.contains("bad_psid"));
+}
+
+#[tokio::test]
+async fn validated_candidate_replaces_disk_and_live_credentials_after_probe() {
+    use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
+    use gemini_bridge_identity::{DefaultIdentityService, IdentityService, SessionStatus};
+    use http::HeaderMap;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _guard = ENV_LOCK.lock().await;
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .and(header(
+            "cookie",
+            "__Secure-1PSID=new_psid; __Secure-1PSIDTS=new_ts; SAPISID=new_sapisid",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(SAMPLE_GEMINI_HTML))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempdir().unwrap();
+    let config = BridgeConfig {
+        server: ServerConfig {
+            bind_addr: "127.0.0.1".into(),
+            port: 8090,
+            api_key: None,
+            cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
+            metrics_enabled: false,
+        },
+        storage: StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            media_ttl_days: 30,
+        },
+        transport: TransportConfig {
+            tls_profile: "chrome".into(),
+            proxy_url: None,
+            timeout_secs: 5,
+        },
+        video: Default::default(),
+    };
+    let service = DefaultIdentityService::with_base_url(&config, Some(server.uri())).unwrap();
+    service
+        .import_credentials("__Secure-1PSID=old_psid; __Secure-1PSIDTS=old_ts; SAPISID=old_sapisid")
+        .await
+        .unwrap();
+
+    let bootstrap = service
+        .import_credentials_validated(
+            "__Secure-1PSID=new_psid; __Secure-1PSIDTS=new_ts; SAPISID=new_sapisid",
+        )
+        .await
+        .unwrap();
+    assert_eq!(bootstrap.bl, "boq_assistant-bard-web-server_20240101.00_p0");
+    assert_eq!(service.snapshot().await.status, SessionStatus::Valid);
+    let persisted = read_cookies(dir.path()).unwrap().unwrap();
+    assert!(persisted.contains("new_psid"));
+    assert!(!persisted.contains("old_psid"));
+
+    let mut headers = HeaderMap::new();
+    service.apply_auth_headers(&mut headers).unwrap();
+    let cookie = headers.get(http::header::COOKIE).unwrap().to_str().unwrap();
+    assert!(cookie.contains("new_psid"));
+    assert!(!cookie.contains("old_psid"));
+}
 
 #[tokio::test]
 async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
@@ -254,6 +545,8 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
     use gemini_bridge_identity::{DefaultIdentityService, IdentityService, SessionStatus};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _guard = ENV_LOCK.lock().await;
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -269,6 +562,10 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
             port: 8090,
             api_key: None,
             cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
             metrics_enabled: false,
         },
         storage: StorageConfig {
@@ -300,6 +597,8 @@ async fn apply_auth_headers_sets_expected_headers() {
     use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
     use gemini_bridge_identity::{DefaultIdentityService, IdentityService};
     use http::HeaderMap;
+    let _guard = ENV_LOCK.lock().await;
+    unsafe { std::env::remove_var("BRIDGE_SECRET") };
 
     let dir = tempdir().unwrap();
     let config = BridgeConfig {
@@ -308,6 +607,10 @@ async fn apply_auth_headers_sets_expected_headers() {
             port: 8090,
             api_key: None,
             cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
             metrics_enabled: false,
         },
         storage: StorageConfig {
