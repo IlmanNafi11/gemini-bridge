@@ -28,6 +28,13 @@ pub struct ListConversationsResponse {
 pub struct ListMessagesResponse {
     pub object: &'static str,
     pub data: Vec<StoredMessage>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListMessagesQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,26 +135,39 @@ pub async fn list_conversations(
     }
 }
 
-pub async fn get_messages(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn get_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ListMessagesQuery>,
+) -> Response {
     let store = match require_store(&state) {
         Ok(s) => s,
         Err(resp) => return *resp,
     };
 
-    // Ensure conversation exists
+    // Ensure conversation exists even when the requested page is empty.
     if let Err(e) = store.get_conversation(&id).await {
         return map_store_error(e);
     }
 
-    match store.get_history(&id).await {
-        Ok(messages) => (
-            StatusCode::OK,
-            Json(ListMessagesResponse {
-                object: "list",
-                data: messages,
-            }),
-        )
-            .into_response(),
+    let limit = query.limit.unwrap_or(100).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    match store.get_history_page(&id, limit + 1, offset).await {
+        Ok(mut messages) => {
+            let has_more = messages.len() > limit;
+            if has_more {
+                messages.pop();
+            }
+            (
+                StatusCode::OK,
+                Json(ListMessagesResponse {
+                    object: "list",
+                    data: messages,
+                    has_more,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => map_store_error(e),
     }
 }

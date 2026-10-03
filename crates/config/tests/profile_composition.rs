@@ -68,11 +68,12 @@ enabled = false
 timeout_secs = 15
 
 [patches.network-later.video]
-enabled = true
+enabled = false
 
 [patches.operator.server]
 port = 8300
 cors_enabled = true
+cors_origins = ["https://client.example"]
 
 [patches.operator.transport]
 timeout_secs = 5
@@ -101,7 +102,7 @@ patches = ["network-later"]
     assert_eq!(config.server.bind_addr, "profile-last");
     assert_eq!(config.storage.media_ttl_days, 7);
     assert_eq!(config.transport.timeout_secs, 5);
-    assert!(config.video.enabled);
+    assert!(!config.video.enabled);
 }
 
 #[test]
@@ -322,4 +323,62 @@ fn legacy_base_configuration_still_ignores_unknown_fields() {
 
     let config = BridgeConfig::load_from_file(&path).unwrap();
     assert_eq!(config.server.port, 9000);
+}
+
+#[test]
+fn rejects_unknown_rate_limit_overlay_fields_with_context() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(
+        &path,
+        r#"
+[patches.limits.server.rate_limit]
+capacity = 10
+refill_tokens = 5
+refill_interval_secs = 30
+refill_interval_second = 1
+"#,
+    )
+    .unwrap();
+
+    let error = BridgeConfig::load_composed(Some(&path), &Composition::new().with_patch("limits"))
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("limits"), "{message}");
+    assert!(
+        message.contains("server.rate_limit.refill_interval_second"),
+        "{message}"
+    );
+}
+
+#[test]
+fn selected_overlays_can_configure_origins_and_runtime_limits() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(
+        &path,
+        r#"
+[profiles.prod.server]
+cors_enabled = true
+cors_origins = ["https://client.example"]
+concurrency_limit = 16
+body_limit_bytes = 2097152
+
+[profiles.prod.server.rate_limit]
+capacity = 20
+refill_tokens = 10
+refill_interval_secs = 30
+"#,
+    )
+    .unwrap();
+
+    let config =
+        BridgeConfig::load_composed(Some(&path), &Composition::new().with_profile("prod")).unwrap();
+    assert_eq!(config.server.cors_origins, vec!["https://client.example"]);
+    assert_eq!(config.server.concurrency_limit, 16);
+    assert_eq!(config.server.body_limit_bytes, 2_097_152);
+    let rate_limit = config.server.rate_limit.unwrap();
+    assert_eq!(rate_limit.capacity, 20);
+    assert_eq!(rate_limit.refill_tokens, 10);
+    assert_eq!(rate_limit.refill_interval_secs, 30);
 }

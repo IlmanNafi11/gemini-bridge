@@ -117,6 +117,7 @@ selection order, and `BRIDGE_*` environment overrides.
    - Data directory: `~/.local/share/gemini-bridge/` (XDG compliant).
    - TLS Profile: `chrome`.
    - Prometheus metrics: disabled (`server.metrics_enabled = false`).
+   - Public API rate limit: burst capacity 60, refilled by 60 tokens every 60 seconds.
 4. **Security Invariant:** API keys or passwords in the config struct must have `Debug` output masked.
 
 ---

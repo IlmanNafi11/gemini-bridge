@@ -5,7 +5,7 @@ use bytes::Bytes;
 use gemini_bridge_config::{
     BridgeConfig, ServerConfig as BridgeSrvCfg, StorageConfig, TransportConfig,
 };
-use gemini_bridge_http_server::{AppState, ServerConfig, build_router};
+use gemini_bridge_http_server::{AppState, ServerConfig, ServerOptions, build_router_with_options};
 use gemini_bridge_identity::DefaultIdentityService;
 use gemini_bridge_media_store::LocalMediaStore;
 use gemini_bridge_upload::push_client::PushUploadClient;
@@ -81,6 +81,10 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             port,
             api_key: None,
             cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
             metrics_enabled: false,
         },
         storage: StorageConfig {
@@ -113,7 +117,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
         UploadLimits::default(),
     ));
 
-    let router = build_router(
+    let router = build_router_with_options(
         ServerConfig {
             bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
             api_key: None,
@@ -128,10 +132,16 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             image_service: None,
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
             media_purge: None,
+        },
+        ServerOptions {
+            cors_origins: vec![],
+            concurrency_limit: 4,
+            body_limit_bytes: 1024,
         },
     );
 
@@ -168,6 +178,42 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
     assert_eq!(response.bytes().await.unwrap(), Bytes::from_static(PNG));
+    let oversized_form = reqwest::multipart::Form::new()
+        .text("metadata", "x".repeat(2048))
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(PNG.to_vec())
+                .file_name("test.png")
+                .mime_str("image/png")
+                .unwrap(),
+        );
+    let oversized = client
+        .post(format!("http://127.0.0.1:{port}/v1/files"))
+        .multipart(oversized_form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let hostile_form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(PNG.to_vec())
+            .file_name("test.png")
+            .mime_str("image/png")
+            .unwrap(),
+    );
+    let hostile = client
+        .post(format!("http://127.0.0.1:{port}/v1/files"))
+        .header("origin", "https://evil.example")
+        .header("sec-fetch-site", "cross-site")
+        .multipart(hostile_form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hostile.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        hostile.json::<serde_json::Value>().await.unwrap()["error"]["code"],
+        "cross_origin_request"
+    );
 
     server.abort();
 }

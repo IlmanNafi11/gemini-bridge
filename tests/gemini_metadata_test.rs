@@ -58,6 +58,10 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             port,
             api_key: None,
             cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
             metrics_enabled: false,
         },
         storage: StorageConfig {
@@ -98,6 +102,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             image_service: None,
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(Some(identity.clone())),
+            identity_service: None,
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,

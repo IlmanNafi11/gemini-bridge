@@ -219,6 +219,10 @@ fn validate_overlay_fields(value: &Value, kind: &str, name: &str) -> Result<(), 
                 "port",
                 "api_key",
                 "cors_enabled",
+                "cors_origins",
+                "concurrency_limit",
+                "body_limit_bytes",
+                "rate_limit",
                 "metrics_enabled",
             ],
             "storage" => &["data_dir", "media_ttl_days"],
@@ -231,13 +235,31 @@ fn validate_overlay_fields(value: &Value, kind: &str, name: &str) -> Result<(), 
                 "invalid {kind} '{name}': section '{section}' must be a TOML table"
             )));
         };
-        for setting in settings.keys() {
+        for (setting, value) in settings {
             if !allowed.contains(&setting.as_str()) {
                 return Err(unknown_overlay_field(
                     kind,
                     name,
                     &format!("{section}.{setting}"),
                 ));
+            }
+            if section == "server" && setting == "rate_limit" {
+                let Some(rate_limit) = value.as_table() else {
+                    return Err(ConfigError::CompositionError(format!(
+                        "invalid {kind} '{name}': section 'server.rate_limit' must be a TOML table"
+                    )));
+                };
+                for nested in rate_limit.keys() {
+                    if !["capacity", "refill_tokens", "refill_interval_secs"]
+                        .contains(&nested.as_str())
+                    {
+                        return Err(unknown_overlay_field(
+                            kind,
+                            name,
+                            &format!("server.rate_limit.{nested}"),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -254,13 +276,7 @@ fn unknown_overlay_field(kind: &str, name: &str, field: &str) -> ConfigError {
 fn defaults_figment() -> Figment {
     // Construct a default BridgeConfig and serialize it to a toml string so
     // figment can use it as the lowest-priority provider.
-    let default_server = ServerConfig {
-        bind_addr: "127.0.0.1".to_string(),
-        port: 8090,
-        api_key: None,
-        cors_enabled: false,
-        metrics_enabled: false,
-    };
+    let default_server = ServerConfig::default();
     let default_storage = StorageConfig {
         data_dir: xdg_data_dir(),
         media_ttl_days: 30,
@@ -300,10 +316,82 @@ fn xdg_data_dir() -> std::path::PathBuf {
 
 #[allow(clippy::result_large_err)]
 fn validate(config: &BridgeConfig) -> Result<(), ConfigError> {
-    if config.server.port == 0 {
+    let server = &config.server;
+    if server.port == 0 {
         return Err(ConfigError::ValidationError(
             "server.port must not be 0".to_string(),
         ));
+    }
+    if !["chrome", "firefox", "safari"]
+        .contains(&config.transport.tls_profile.to_ascii_lowercase().as_str())
+    {
+        return Err(ConfigError::ValidationError(format!(
+            "transport.tls_profile '{}' is not a supported preset; expected one of chrome, firefox, safari",
+            config.transport.tls_profile
+        )));
+    }
+    if let Some(api_key) = &server.api_key
+        && (api_key.trim().is_empty() || api_key.chars().count() < 32)
+    {
+        return Err(ConfigError::ValidationError(
+            "server.api_key must be non-empty and at least 32 characters".to_string(),
+        ));
+    }
+    if server.cors_enabled && server.cors_origins.is_empty() {
+        return Err(ConfigError::ValidationError(
+            "server.cors_enabled requires at least one explicit server.cors_origins entry"
+                .to_string(),
+        ));
+    }
+    for origin in &server.cors_origins {
+        validate_cors_origin(origin)?;
+    }
+    if server.concurrency_limit == 0 {
+        return Err(ConfigError::ValidationError(
+            "server.concurrency_limit must be greater than 0".to_string(),
+        ));
+    }
+    if server.body_limit_bytes == 0 {
+        return Err(ConfigError::ValidationError(
+            "server.body_limit_bytes must be greater than 0".to_string(),
+        ));
+    }
+    if let Some(rate_limit) = &server.rate_limit
+        && (rate_limit.capacity == 0
+            || rate_limit.refill_tokens == 0
+            || rate_limit.refill_interval_secs == 0)
+    {
+        return Err(ConfigError::ValidationError(
+            "server.rate_limit values must be greater than 0".to_string(),
+        ));
+    }
+    if config.video.enabled {
+        return Err(ConfigError::ValidationError(
+            "video.enabled=true is unsupported because this binary has no production video adapter"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cors_origin(origin: &str) -> Result<(), ConfigError> {
+    let valid_scheme = origin.starts_with("https://") || origin.starts_with("http://");
+    let authority = origin
+        .split_once("://")
+        .map(|(_, authority)| authority)
+        .unwrap_or_default();
+    if origin == "*"
+        || !valid_scheme
+        || authority.is_empty()
+        || authority.contains('*')
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#')
+        || origin.chars().any(char::is_whitespace)
+    {
+        return Err(ConfigError::ValidationError(format!(
+            "server.cors_origins entry '{origin}' must be an explicit HTTP(S) origin without path, query, fragment, whitespace, or wildcard"
+        )));
     }
     Ok(())
 }

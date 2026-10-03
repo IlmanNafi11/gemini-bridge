@@ -25,13 +25,7 @@ pub async fn create_file(State(state): State<AppState>, mut multipart: Multipart
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
             Ok(None) => break,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error":"invalid multipart request"})),
-                )
-                    .into_response();
-            }
+            Err(error) => return error.into_response(),
         };
         if field.name() != Some("file") {
             continue;
@@ -44,13 +38,7 @@ pub async fn create_file(State(state): State<AppState>, mut multipart: Multipart
             let chunk = match field.chunk().await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error":"invalid multipart file body"})),
-                    )
-                        .into_response();
-                }
+                Err(error) => return error.into_response(),
             };
             let received = bytes.len().saturating_add(chunk.len()) as u64;
             if received > limit {

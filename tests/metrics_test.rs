@@ -92,6 +92,7 @@ async fn spawn_server(
         image_service: None,
         video_service: None,
         health_admin,
+        identity_service: Some(Arc::new(LocalIdentity)),
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
@@ -207,6 +208,49 @@ async fn metrics_scrape_reports_request_error_and_latency_series() {
         "gemini_bridge_http_request_duration_seconds_count{method=\"GET\",route=\"/healthz\"} 1"
     ));
     assert!(!body.contains("route=\"/metrics\""));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn dynamic_resource_ids_collapse_to_one_bounded_metric_series() {
+    let (client, base_url, server) = spawn_server(true).await;
+
+    for index in 0..64 {
+        let response = client
+            .get(format!("{base_url}/v1/images/user-controlled-{index}"))
+            .bearer_auth(API_KEY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    let body = client
+        .get(format!("{base_url}/metrics"))
+        .bearer_auth(API_KEY)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    let request_series: Vec<_> = body
+        .lines()
+        .filter(|line| {
+            line.starts_with("gemini_bridge_http_requests_total{")
+                && line.contains("route=\"/v1/images/{id}\"")
+        })
+        .collect();
+    assert_eq!(
+        request_series,
+        [
+            "gemini_bridge_http_requests_total{method=\"GET\",route=\"/v1/images/{id}\",status_class=\"5xx\"} 64"
+        ]
+    );
+    assert!(!body.contains("user-controlled-0"));
+    assert!(!body.contains("user-controlled-63"));
 
     server.abort();
 }

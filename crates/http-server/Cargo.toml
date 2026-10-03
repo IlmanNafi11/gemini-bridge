@@ -37,3 +37,4 @@ gemini-bridge-adapter-video = { path = "../video-adapter" }
 [dev-dependencies]
 reqwest = { workspace = true }
 wiremock = { workspace = true }
+tracing-subscriber = { workspace = true }

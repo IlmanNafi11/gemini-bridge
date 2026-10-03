@@ -30,7 +30,7 @@ pub trait HealthAdminService: Send + Sync {
     /// Return full diagnostic admin status snapshot.
     async fn admin_status(&self) -> AdminStatusResponse;
 
-    /// Attempt guided re-authentication by importing credentials and running bootstrap.
+    /// Validate candidate credentials before atomically replacing persisted and live state.
     async fn reauth(&self, raw_cookie_header: &str) -> Result<ReauthResponse, HealthAdminError>;
 
     /// Hot-swap a named plugin instance (Fase 3).
@@ -182,13 +182,8 @@ impl HealthAdminService for DefaultHealthAdminService {
             HealthAdminError::ReauthFailed("No identity service configured".into())
         })?;
 
-        identity
-            .import_credentials(raw_cookie_header)
-            .await
-            .map_err(|e| HealthAdminError::ReauthFailed(e.to_string()))?;
-
         let bootstrap = identity
-            .bootstrap()
+            .import_credentials_validated(raw_cookie_header)
             .await
             .map_err(|e| HealthAdminError::ReauthFailed(e.to_string()))?;
 

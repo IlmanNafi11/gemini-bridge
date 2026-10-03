@@ -57,6 +57,14 @@ impl IdentityService for MockIdentity {
         }
         Ok(())
     }
+
+    async fn import_credentials_validated(
+        &self,
+        raw: &str,
+    ) -> Result<SessionBootstrap, IdentityError> {
+        self.import_credentials(raw).await?;
+        self.bootstrap().await
+    }
 }
 
 #[tokio::test]

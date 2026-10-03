@@ -19,8 +19,8 @@ Acts as the thin routing and transport layer: it coordinates handler execution, 
 - Route registration and dispatch (Fase 0: chat, models; later: files, images, conversations, gallery, health/admin, metrics)
 - Bearer token authentication middleware
 - Request ID injection (`x-request-id` UUID v4) and response header propagation
-- SSE stream orchestration (`axum::response::Sse`, keep-alive, terminal `[DONE]`)
-- HTTP error mapping using `openai-compat` envelopes
+- SSE stream orchestration (`axum::response::Sse`, keep-alive, terminal `[DONE]` only on success)
+- HTTP error mapping using `openai-compat` envelopes; mid-stream failures are JSON SSE error events and end without `[DONE]`
 - Server lifecycle: `build_router`, `start_server`
 
 **Out of scope:**
@@ -161,17 +161,27 @@ pub fn build_reloadable_gemini_adapter(
 3. **Binding & Network Security:**
    - Default bind host is `127.0.0.1:8090`.
    - Binding `0.0.0.0` or a non-loopback address **without an API key configured** is rejected at startup with `ServerError::Bind`, preventing accidental public exposure without auth.
+   - Unauthenticated loopback mutation routes reject cross-site browser requests identified by `Origin` or `Sec-Fetch-Site`; native clients without browser-origin headers remain usable.
+   - Concurrency admission is bounded and fail-fast (`503 server_overloaded`), and each permit is retained through the complete response body stream.
+   - Graceful shutdown drains in-flight requests for at most 30 seconds; expiry returns typed `ServerError::ShutdownTimeout` and emits an error log.
+
 
 4. **SSE Streaming Contract:**
    - When `stream: true`, the handler returns `axum::response::Sse` with Content-Type `text/event-stream`.
    - Keep-alive pings are enabled (`KeepAlive::default()`).
    - Every event line is `data: <JSON>\n\n`.
-   - The stream terminates with `data: [DONE]\n\n`.
+   - A clean stream terminates with `data: [DONE]\n\n`.
    - Stream back-pressure: Events are driven from an async `LlmEventStream`; slow or stalled consumers do not block server-wide threads.
-   - Provider errors during active streaming are emitted as a final data event (`data: {"error": "..."}`) before closing the stream cleanly.
+   - Provider errors during active streaming are serialized as a final JSON data event (`data: {"error":"..."}`), then the stream closes **without** `[DONE]`. `[DONE]` means successful completion only.
 
 5. **Error Format:**
-   All handler errors return HTTP status with `OpenAiErrorResponse` JSON body. Bare text error responses are strictly prohibited.
+   All handler errors return HTTP status with `OpenAiErrorResponse` JSON body. Bare text error responses are strictly prohibited. Errors after SSE headers have been sent cannot change the HTTP status and use the JSON SSE error event contract above.
+
+6. **Browser and Payload Security:**
+   - All non-gallery responses retain `Content-Security-Policy: default-src 'none'`.
+   - The embedded gallery HTML uses exact SHA-256 CSP hashes for its bundled inline style and script, with same-origin-only image and connection sources.
+   - The configured body limit applies to the complete multipart request while the upload service independently preserves its per-file byte cap.
+
 
 ---
 
@@ -183,9 +193,9 @@ pub fn build_reloadable_gemini_adapter(
 |---|---|
 | `POST /v1/chat/completions` accepts request, supports streaming & non-streaming | `handlers::chat::chat_completions` |
 | Non-stream response returns JSON `ChatCompletionResponse` | `handlers::chat::non_stream_response` |
-| Stream response returns SSE text/event-stream with `[DONE]` | `handlers::chat::stream_response` |
-| Error mapping for 401, 429, 503, 502, 400 | `handlers::chat::map_llm_error` |
-| `GET /v1/models` returns virtual model list | `handlers::models::list_models_handler` |
+| Clean stream returns SSE text/event-stream with `[DONE]` | `handlers::chat::stream_response` appends the sentinel only after clean completion |
+| Mid-stream provider failure emits JSON error and no `[DONE]` | `handlers::chat::stream_response` serializes the error event and suppresses the success sentinel |
+| Rejected upstream continuity maps to HTTP 410 | `handlers::chat::map_llm_error` returns `invalid_request_error` with no code for `LlmError::ContinuityRejected` |
 
 ### US-8 Traceability (Operational Routes & Health)
 
@@ -202,8 +212,8 @@ The reload route accepts `{"plugin":"<name>"}`. It returns HTTP 200 only after t
 ### Acceptance criteria (module-level)
 
 1. `POST /v1/chat/completions` with valid non-stream payload returns HTTP 200 with `ChatCompletionResponse` body.
-2. `POST /v1/chat/completions` with `stream: true` returns `Content-Type: text/event-stream`, emits `ChatCompletionChunk` events, and ends with `data: [DONE]`.
-3. Unknown model string returns HTTP 400 with `invalid_request_error` JSON envelope.
+2. `POST /v1/chat/completions` with `stream: true` returns `Content-Type: text/event-stream`, emits `ChatCompletionChunk` events, and ends with `data: [DONE]` only on clean completion. A mid-stream failure ends with a JSON error event and no `[DONE]`.
+3. Unknown model string returns HTTP 400 with `invalid_request_error` JSON envelope; `LlmError::ContinuityRejected` returns HTTP 410 with type `invalid_request_error` and no error code.
 4. When `api_key` is configured, requests without `Authorization: Bearer <key>` return HTTP 401 with `invalid_api_key`.
 5. When `api_key` is `None`, public routes accept unauthenticated requests.
 6. Every response carries the `x-request-id` header matching the incoming header or newly generated UUID.
@@ -216,7 +226,7 @@ The reload route accepts `{"plugin":"<name>"}`. It returns HTTP 200 only after t
 
 - **Handler unit tests (`e2e_chat_test.rs`):**
   - Non-streaming chat request with mock adapter returning text.
-  - Streaming chat request with mock adapter yielding chunks; collect SSE stream and verify ordering, chunk shape, and `[DONE]` termination.
+  - Streaming chat with mock adapter: verify chunk ordering/shape and `[DONE]` after clean completion; inject a mid-stream provider failure and verify the final event is JSON error data with no `[DONE]`.
   - Model alias parsing error returns 400.
   - Provider errors (Authentication → 401, RateLimited → 429, Unavailable → 503) return corresponding HTTP status codes.
 - **Authentication tests:**

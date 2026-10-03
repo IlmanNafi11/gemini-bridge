@@ -215,6 +215,94 @@ async fn reload_prepare_timeout_keeps_old_generation_active() {
     assert_eq!(completion.text, "Response from generation 1");
 }
 
+struct FailingReloader;
+
+#[async_trait]
+impl PluginReloader for FailingReloader {
+    async fn prepare(&self, plugin_name: &str) -> Result<ReloadCommit, HealthAdminError> {
+        Err(HealthAdminError::ReloadFailed(format!(
+            "replacement validation failed for '{plugin_name}'"
+        )))
+    }
+}
+
+#[tokio::test]
+async fn failed_reload_returns_exact_error_and_keeps_old_generation() {
+    let port = free_port();
+    let adapter = Arc::new(ReloadableAdapter::new(
+        Arc::new(GenerationalAdapter::new(1)) as Arc<dyn LlmAdapter>,
+    ));
+    let health_admin = Arc::new(
+        DefaultHealthAdminService::new(Some(Arc::new(MockIdentity)))
+            .with_reloader(Arc::new(FailingReloader)),
+    );
+    let state = AppState {
+        adapter,
+        upload_service: None,
+        image_service: None,
+        video_service: None,
+        health_admin,
+        identity_service: Some(Arc::new(MockIdentity)),
+        conversation_store: None,
+        tool_engine: Arc::new(DefaultToolEngine),
+        gallery_service: None,
+        media_purge: None,
+    };
+    let router = build_router(
+        ServerConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            api_key: Some("secret-key".to_owned()),
+            require_key_for_admin: true,
+            cors_enabled: false,
+            rate_limit: None,
+            metrics_enabled: false,
+        },
+        state,
+    );
+    let server = spawn_server(router, port).await;
+    let client = Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    let reload = client
+        .post(format!("{base}/admin/reload-plugin"))
+        .bearer_auth("secret-key")
+        .json(&json!({"plugin": "gemini-adapter"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reload.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        reload.json::<Value>().await.unwrap(),
+        json!({
+            "error": {
+                "message": "Plugin reload failed",
+                "type": "server_error",
+                "code": "reload_failed"
+            }
+        })
+    );
+
+    let completion = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth("secret-key")
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "still live"}],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completion.status(), reqwest::StatusCode::OK);
+    let body: Value = completion.json().await.unwrap();
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "Response from generation 1"
+    );
+
+    server.abort();
+}
+
 #[tokio::test]
 async fn test_admin_reload_auth_matrix() {
     let port = free_port();
@@ -233,6 +321,7 @@ async fn test_admin_reload_auth_matrix() {
         image_service: None,
         video_service: None,
         health_admin,
+        identity_service: None,
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine),
         gallery_service: None,
@@ -348,6 +437,7 @@ async fn test_active_sse_stream_preservation_during_reload() {
         upload_service: None,
         image_service: None,
         video_service: None,
+        identity_service: Some(Arc::new(MockIdentity)),
         health_admin,
         conversation_store: None,
         tool_engine: Arc::new(DefaultToolEngine),
