@@ -8,9 +8,9 @@
 
 ## Overview
 
-Deliver a self-hosted Rust service that exposes Gemini Web through the specified OpenAI-compatible API. Work is organized as end-to-end slices: first establish the project and a non-streaming chat path; then deliver streaming, files, image generation, and operations; then persistence, tool calling, and gallery; finally metadata extensions, experimental video, plugin lifecycle/reload, a second adapter, observability, and release packaging. Each task leaves a reviewable, testable result and is gated by its dependencies and phase checkpoint.
+Deliver a self-hosted Rust service that exposes Gemini Web through the specified OpenAI-compatible API. Work is organized as end-to-end slices: chat and transport; streaming, files, image generation, and operations; persistence, tool calling, and gallery; then metadata, plugin lifecycle/reload, a second adapter, observability, and release packaging. Video remains a reserved route/model contract only: no production generator is shipped.
 
-This repository currently contains project documents but no application source. Therefore source paths listed in `tasks/todo.md` are planned paths derived from the approved architecture, not existing conventions. Confirm crate naming and public interfaces in module specs before implementation.
+The application workspace and implementation now exist. Paths in `tasks/todo.md` identify the current implementation or verification surface; completed markers describe deterministic repository evidence only, while checkpoints retain live, KPI, soak, browser, and platform gates.
 
 ## Architecture and dependency graph
 
@@ -31,7 +31,7 @@ openai-compat + llm-service ─> tool-calling (chat integration)
 gemini-adapter ─> code-exec-surface
 llm-service / provider contract ─> secondary adapter proof
 plugin-context ─> plugin lifecycle/reload; http-server + identity expose operations
-Gemini adapter contract ─> experimental video capability
+Reserved video route/models (production enablement rejected; no adapter runtime)
 ```
 
 **Build order:**
@@ -39,7 +39,7 @@ Gemini adapter contract ─> experimental video capability
 2. Fase 0: workspace/plugin context and config; transport; identity; neutral LLM contract and Gemini adapter; OpenAI-compatible non-streaming chat API.
 3. Fase 1: streaming and media storage can proceed independently after Fase 0 contracts; upload depends on transport/identity/media storage; image generation depends on upload and adapter; operations and middleware integrate with the server.
 4. Fase 2: persistence precedes continuity/branching; tool calling extends the chat contract; gallery builds on media storage and HTTP routing; full middleware policy applies across routes.
-5. Fase 3: metadata and experimental video use established adapter contracts; reload builds on plugin lifecycle and live streams; secondary adapter proves provider neutrality; then metrics and release packaging.
+5. Fase 3: metadata, the disabled video route contract, reload, provider-neutrality proof, metrics, and release packaging build on established interfaces. Production video generation is not part of the shipped phase.
 
 ## Work plan
 
@@ -51,8 +51,8 @@ Task acceptance criteria, verification commands, dependency IDs, and expected fi
 
 ### Fase 0 — Bootstrap: non-stream chat
 - **0.1–0.2:** Cargo workspace/static plugin context and TOML/environment configuration.
-- **0.3:** Configurable transport with the Phase 0 TLS fingerprint profile and HTTP/SOCKS5 proxy support.
-- **0.4:** Session bootstrap, secure local cookie import/storage, and `auth login` / `doctor` CLI path.
+- **0.3:** Configurable transport with browser-style HTTP header presets and HTTP/SOCKS5 proxy support. Presets do not impersonate JA3 or the TLS ClientHello.
+- **0.4:** Session bootstrap, secure local cookie import/storage, and `auth login` / `doctor` CLI path. `auth login` validates a candidate with `/app` before atomically installing it; failure preserves the prior file. Live upstream compatibility remains a separate credentialed gate.
 - **0.5–0.6:** Provider-neutral LLM contract and Gemini Web non-stream protocol/parser, with upstream schema data and fixtures.
 - **0.7:** OpenAI-compatible non-streaming chat and models endpoint.
 - **Checkpoint 0:** Full chat request through local REST endpoint to mock upstream; live upstream smoke only with locally supplied credentials; unit/integration, lint, formatting, and contract checks pass.
@@ -75,7 +75,7 @@ Task acceptance criteria, verification commands, dependency IDs, and expected fi
 
 ### Fase 3 — v2.0: extensions and release readiness
 - **3.1:** Surface code execution output and citations as optional `gemini_metadata`.
-- **3.2:** Off-by-default experimental video capability and explicit 501 behavior when unavailable.
+- **3.2:** Preserve deterministic video request/error models and routes under the configured `/v1/*` API-key policy, returning 501 while production generation is unshipped; reject `video.enabled = true` during config loading.
 - **3.3:** Runtime plugin reload with active stream preservation and measured <2-second reload, respecting the selected static-registry-first strategy.
 - **3.4:** Second provider/mock adapter proving the neutral contract.
 - **3.5:** Profiles/bundles/patch overlays, opt-in metrics, and lightweight status dashboard.
@@ -85,32 +85,91 @@ Task acceptance criteria, verification commands, dependency IDs, and expected fi
 ## Verification approach
 
 - Run focused deterministic unit/integration tests for each slice; mock upstream protocol and failures with `wiremock`; use `insta` snapshots for upstream parser fixtures.
-- Exercise user-visible REST/SSE routes end-to-end against a mock upstream at each endpoint milestone. Use live Gemini checks only for explicitly designated acceptance runs with credentials kept outside the repository.
-- Run repository quality gates after each meaningful implementation slice: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and workspace unit/integration tests. Use `cargo nextest run --workspace` where installed.
-- Phase gates additionally verify PRD-specific live image samples, resilience drills, latency/RSS, continuous-run success, binary size, and reload behavior where applicable. These operational KPIs require dedicated test environment and should not be represented as proven by unit tests.
+- Exercise user-visible REST/SSE routes end-to-end against a mock upstream at each endpoint milestone. A failed SSE emits a final JSON error event and closes without `[DONE]`; `[DONE]` is success-only.
+- Use live Gemini checks only for explicitly designated acceptance runs with credentials kept outside the repository. Header-preset tests do not prove live compatibility or JA3/ClientHello impersonation.
+- Phase gates additionally verify PRD-specific live image samples, resilience drills, latency/RSS, continuous-run success, binary size, and reload behavior where applicable. These operational KPIs require a dedicated environment and are never represented as proven by deterministic tests.
 - Maintain runnable service state after each vertical slice; do not mark a task or checkpoint complete based only on compilation.
 
 ## Risks and mitigations
 
 | Risk / uncertainty | Impact | Mitigation / gate |
 |---|---|---|
-| Gemini `f.req`, response tree, and TLS fingerprint behavior change or library support is unsuitable | High | Prove transport and parser assumptions early in Fase 0 with fixtures and a live smoke; keep schema mapping external and isolate adaptation behind interfaces. |
-| Root SPEC lists 18 modules but claims 17; module/crate names and dependency diagram are not fully aligned | Medium | P.1 resolves traceability and records any remaining decision before module specs or code. |
+| Gemini `f.req` or response-tree behavior changes | High | Keep schema mapping external, exercise sanitized fixtures early, and require a separate credentialed live smoke for current upstream compatibility. |
+| Browser-named transport profiles could be mistaken for TLS impersonation | High | Specify and test them as HTTP header presets only; make no JA3/ClientHello claim. |
 | Account restrictions, expiry, or IP flagging | High | Local-only credentials, `doctor`, status states, bounded refresh/retry, proxy configuration; no secrets in tests/logs. |
-| SSRF, DNS rebinding, malicious/oversized uploads, sensitive cached media | High | Module-level threat contract; enforce size/MIME checks and DNS-pinned address validation; test boundary cases; document local storage and purge. |
+| SSRF, DNS rebinding, malicious/oversized uploads, sensitive cached media | High | Enforce size/MIME and DNS-pinned address validation; test boundary cases; document local storage and manual purge. |
 | Latency/memory/static-binary KPIs conflict with TLS, database, and image dependencies | Medium | Measure at each relevant gate on target build; avoid claiming KPI success from local unit tests. |
-| Dynamic library loading conflicts with static, zero-unsafe initial registry | High | Keep Fase 0–2 built-in registry. Before Fase 3, define whether reload means in-process replacement of built-in plugins or dynamic library loading; resolve ABI/unsafe/security implications before implementation. |
-| Real upstream acceptance tests depend on account availability and upstream stability | Medium | Separate deterministic mock suite from opt-in live acceptance runs; report live acceptance prerequisites explicitly. |
+| Dynamic library loading conflicts with static, zero-unsafe initial registry | High | Use built-in instance replacement rather than runtime dynamic library loading. |
+| Real upstream acceptance tests depend on account availability and upstream stability | Medium | Separate deterministic mock suites from opt-in live acceptance runs; report live acceptance prerequisites explicitly. |
 
-## Open decisions / prerequisites
+## External evidence prerequisites
 
-1. Reconcile the module count and implementation naming in `SPEC.md` before coding (P.1).
-2. Specify the exact Fase 3 reload mechanism: built-in plugin instance replacement or dynamic library loading. The current approved material contains both static registry first and dynamic loading later.
-3. Validate the selected TLS/JA3 implementation and actual profile coverage in a Fase 0 spike; the approved spec identifies the capability but not a settled Rust crate/API.
-4. Confirm the source of upstream fixtures and how live tests are provisioned without committing account identifiers or credentials.
-5. Choose the definitive config crate and confirm crypto primitive/key derivation in module specs; current SPEC offers alternatives / target behavior rather than settled details.
-6. Deployment to staging/production, Dokploy setup, and CI deployment execution remain outside this plan's scope; build artifacts/configuration are included only where required by the PRD.
+1. Current Gemini Web compatibility requires operator-provided credentials and an observed live `doctor`/chat/image run; deterministic header, parser, and mock tests do not establish it.
+2. Live credentials/account identifiers and the source environment for live fixtures remain external and must not be committed.
+3. Latency, RSS, cold-start, binary-size, and seven-day soak claims require retained target-environment measurements.
+4. Browser axe verification requires an actual browser runtime; Docker checks require an available Docker daemon. Unavailable tools remain reported blockers rather than inferred passes.
+5. Deployment to staging/production, Dokploy setup, and CI deployment execution remain outside this plan's scope; build artifacts/configuration are included only where required by the PRD.
 
 ## Review gate
 
 This document and `tasks/todo.md` are proposed for human review. Implementation starts only after the plan, module boundaries, unresolved decisions that block a task, and task tracker are accepted.
+
+## Release remediation plan — 2026-10-02
+
+The production-readiness review found security, contract, persistence, runtime,
+accessibility, and release-pipeline gaps. The operator approved a complete
+remediation pass. Work proceeds risk-first and remains on `dev`.
+
+### R.1 — Harden untrusted media retrieval
+- Parse provider-returned media URLs, enforce HTTPS and an exact allowlisted
+  host boundary, resolve and pin globally routable addresses, validate every
+  redirect, bound time and bytes, and require recognized media signatures.
+- Apply the shared media-fetch policy to every shipped untrusted media retrieval path. The unshipped video adapter remains outside production downloader claims.
+- Add regression tests for host-confusion SSRF, private addresses, redirects,
+  oversized/chunked bodies, timeout/error behavior, and MIME mismatch.
+
+### R.2 — Restore runtime contract truth
+- Make Gemini streaming incremental from the upstream socket through SSE with
+  cancellation/back-pressure and bounded frame/body buffers.
+- Make video configuration truthful: production video is not shipped,
+  `video.enabled = true` is rejected, and the registered contract-only routes
+  return JSON 501 while disabled.
+- Wire explicit-origin CORS, configurable request limits, strict API-key
+  validation, profiles/bundles/patch selectors, external schema self-check,
+  startup credential validation, and graceful shutdown.
+- Add binary/HTTP tests for every production wiring branch and complete error
+  mappings, including mid-stream failures and non-loopback binding.
+
+### R.3 — Protect credentials and durable state
+- Rotate `1PSIDTS` through the production 405 recovery path while preserving
+  error taxonomy and retry bounds.
+- Validate candidate credentials before atomically replacing the persisted
+  credential file; use a password KDF and enforce strong secret input.
+- Persist complete conversation turns and upstream identifiers in one
+  transaction with unique sequence constraints and deterministic concurrent
+  behavior; surface persistence failures.
+- Apply configured media TTL as expiry metadata, retain restrictive data permissions and indexed/bounded metadata queries, and keep reference accounting race-safe. Cleanup remains an explicit authenticated admin purge; no scheduled deletion is claimed.
+
+### R.4 — Complete release, UI, and operational gates
+- Require authorization on mutating loopback APIs, preserve the documented
+  single-operator boundary, add security headers, and close gallery XSS/auth,
+  label, landmark, focus, contrast, and status-announcement gaps.
+- Pin CI actions/toolchain/base images, separate least-privilege publication,
+  add fmt/clippy/test/audit/static-artifact/container/systemd/archive gates,
+  publish an authenticated checksum manifest, SBOM/provenance, and `LICENSE`.
+- Add CLI, migration, concurrency, error-map, metrics-cardinality, request-ID,
+  logging, image-count/error, purge-reference, reload-error, and packaging tests.
+- Add opt-in live upstream suites and reproducible KPI/load/soak tooling. Live
+  credentials and elapsed soak evidence remain external prerequisites and may
+  not be represented as passed without an observed run.
+
+### Remediation verification gate
+- Focused regression tests pass after each slice.
+- `cargo fmt --all -- --check`, workspace clippy with warnings denied, locked
+  workspace build/tests, and `cargo audit` pass.
+- Static-musl artifact passes size, cold-start, health/readiness/auth, archive,
+  checksum, and runtime smoke checks.
+- Browser gallery verification has no axe-core violations and works at required
+  responsive widths with keyboard navigation.
+- Docker/systemd checks and opt-in external tests are either observed passing or
+  explicitly reported as external blockers; they are never inferred.
