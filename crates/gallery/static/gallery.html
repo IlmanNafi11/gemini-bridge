@@ -6,18 +6,39 @@
 <title>Gemini Bridge Gallery</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1.5rem; }
-  h1 { margin-bottom: 1rem; font-size: 1.4rem; letter-spacing: .02em; }
+  body {
+    font-family: system-ui, sans-serif; background: #111; color: #eee;
+    padding: 1.5rem; line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; letter-spacing: .02em; }
+  .page-header { margin-bottom: 1.25rem; }
+  #gallery-title { font-size: .95rem; color: #bbb; margin-bottom: .5rem; }
+
+  /* Visible keyboard focus: high-contrast amber ring, never suppressed. */
+  :focus-visible {
+    outline: 3px solid #ffd166;
+    outline-offset: 2px;
+  }
 
   /* Filters */
-  #filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
-  #filters input, #filters button {
-    background: #1e1e1e; border: 1px solid #333; color: #eee;
-    padding: .4rem .8rem; border-radius: 4px; font-size: .9rem;
+  #filters {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: .75rem 1rem; align-items: end; margin-bottom: 1.5rem;
   }
-  #filters input::placeholder { color: #666; }
-  #filters button { cursor: pointer; background: #2a2a2a; }
-  #filters button:hover { background: #333; }
+  #filters .field { display: flex; flex-direction: column; gap: .3rem; }
+  #filters label { font-size: .8rem; color: #bbb; }
+  #filters input {
+    background: #1e1e1e; border: 1px solid #777; color: #eee;
+    padding: .4rem .6rem; border-radius: 4px; font-size: .9rem; width: 100%;
+  }
+  #filters ::placeholder { color: #9a9a9a; }
+  #filters .actions { display: flex; gap: .5rem; }
+  #filters button {
+    background: #2a2a2a; border: 1px solid #777; color: #eee;
+    padding: .45rem .9rem; border-radius: 4px; font-size: .9rem; cursor: pointer;
+  }
+  #filters button:hover { background: #3a3a3a; }
 
   /* Gallery grid */
   #gallery {
@@ -30,48 +51,88 @@
   }
   .item img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; background: #111; }
   .item .meta { padding: .6rem; font-size: .8rem; }
-  .item .prompt { color: #bbb; margin-bottom: .25rem; word-break: break-word; }
-  .item .info { color: #666; font-size: .75rem; }
+  .item .prompt { color: #bbbbbb; margin-bottom: .25rem; word-break: break-word; }
+  .item .info { color: #9a9a9a; font-size: .75rem; }
   .item .actions { display: flex; gap: .5rem; padding: .5rem .6rem; border-top: 1px solid #2a2a2a; }
   .item .actions a, .item .actions button {
     flex: 1; text-align: center; padding: .35rem 0; border-radius: 4px;
-    border: 1px solid #333; background: #2a2a2a; color: #eee;
+    border: 1px solid #777; background: #2a2a2a; color: #eee;
     font-size: .78rem; cursor: pointer; text-decoration: none;
   }
-  .item .actions button:hover { background: #3a1010; border-color: #a33; color: #faa; }
+  .item .actions a:hover, .item .actions button:hover { background: #3a3a3a; }
+  .item .actions button.confirm, .item .actions button.confirm:hover {
+    background: #3a1010; border-color: #a33; color: #ffaaaa;
+  }
+  .item .empty, #gallery .empty { grid-column: 1 / -1; color: #9a9a9a; padding: 1rem 0; }
 
   /* Pagination */
   #pagination { display: flex; justify-content: center; gap: .5rem; margin-top: 1.5rem; }
   #pagination button {
-    background: #1e1e1e; border: 1px solid #333; color: #eee;
+    background: #1e1e1e; border: 1px solid #777; color: #eee;
     padding: .4rem .9rem; border-radius: 4px; cursor: pointer;
   }
-  #pagination button:disabled { opacity: .35; cursor: default; }
+  #pagination button:disabled { opacity: .45; cursor: default; }
   #pagination .page-info { align-self: center; color: #888; font-size: .85rem; }
-  #status { color: #888; margin-top: 1rem; font-size: .85rem; }
+
+  /* Status live region */
+  #status { color: #888; margin-top: 1rem; font-size: .85rem; min-height: 1.25rem; }
+  #status.error { color: #ffaaaa; }
+
+  @media (max-width: 640px) {
+    body { padding: 1rem; }
+    #gallery { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .75rem; }
+    #filters { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
-<h1>Gallery</h1>
+<header class="page-header">
+  <h1>Gallery</h1>
+</header>
 
-<div id="filters">
-  <input id="f-prompt" type="text" placeholder="Prompt contains…" />
-  <input id="f-model" type="text" placeholder="Model (exact)" />
-  <input id="f-from" type="number" placeholder="Date from (unix)" />
-  <input id="f-to" type="number" placeholder="Date to (unix)" />
-  <button id="btn-filter">Filter</button>
-  <button id="btn-clear">Clear</button>
-</div>
+<main id="main">
+  <form id="filters" aria-label="Gallery filters">
+    <div class="field">
+      <label for="f-prompt">Prompt contains</label>
+      <input id="f-prompt" type="text" placeholder="e.g. mountain sunset" />
+    </div>
+    <div class="field">
+      <label for="f-model">Model (exact)</label>
+      <input id="f-model" type="text" placeholder="e.g. gemini-2.5-flash" />
+    </div>
+    <div class="field">
+      <label for="f-from">Date from (unix)</label>
+      <input id="f-from" type="number" placeholder="e.g. 1720000000" />
+    </div>
+    <div class="field">
+      <label for="f-to">Date to (unix)</label>
+      <input id="f-to" type="number" placeholder="e.g. 1750000000" />
+    </div>
+    <div class="actions">
+      <button id="btn-filter" type="submit">Filter</button>
+      <button id="btn-clear" type="button">Clear</button>
+    </div>
+  </form>
 
-<div id="gallery"></div>
-<div id="pagination"></div>
-<div id="status"></div>
+  <section id="gallery-section" aria-labelledby="gallery-title">
+    <h2 id="gallery-title" tabindex="-1">Gallery items</h2>
+    <div id="gallery"></div>
+  </section>
+
+  <nav id="pagination" aria-label="Gallery pages"></nav>
+
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+</main>
 
 <script>
 (function () {
   'use strict';
   var PAGE_LIMIT = 24;
   var state = { offset: 0, total: 0, prompt: '', model: '', dateFrom: '', dateTo: '' };
+  var statusEl = document.getElementById('status');
+  var galleryEl = document.getElementById('gallery');
+  var galleryTitleEl = document.getElementById('gallery-title');
+  var armed = null; // { btn, cancel } while a delete confirmation is pending.
 
   function qs(s) { return document.querySelector(s); }
 
@@ -85,84 +146,118 @@
     return url;
   }
 
-  function load() {
-    fetch(buildUrl())
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        state.total = data.total || 0;
-        renderGallery(data.data || []);
-        renderPagination();
-        qs('#status').textContent = data.total + ' item(s) found.';
-      })
-      .catch(function(err){
-        qs('#status').textContent = 'Error loading gallery: ' + err.message;
-      });
-  }
-
-  function escapeText(s) {
-    var d = document.createElement('div');
-    d.appendChild(document.createTextNode(s));
-    return d.innerHTML;
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.classList.toggle('error', !!isError);
   }
 
   function formatDate(unix) {
     return new Date(unix * 1000).toLocaleString();
   }
 
+  // Build every gallery node with the DOM API and textContent only. Untrusted
+  // prompt/model/id content can never be parsed as HTML, so hostile strings
+  // cannot create script or event-handler elements.
+  function makeItemNode(item) {
+    var div = document.createElement('div');
+    div.className = 'item';
+
+    var downloadUrl = '/gallery/' + encodeURIComponent(item.id) + '/download';
+
+    var img = document.createElement('img');
+    img.src = downloadUrl;
+    img.alt = item.prompt ? String(item.prompt) : 'Generated image';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+
+    var prompt = document.createElement('div');
+    prompt.className = 'prompt';
+    prompt.textContent = item.prompt || '(no prompt)';
+
+    var info = document.createElement('div');
+    info.className = 'info';
+    if (item.model) {
+      var modelSpan = document.createElement('span');
+      modelSpan.textContent = item.model;
+      info.appendChild(modelSpan);
+      info.appendChild(document.createTextNode(' · '));
+    }
+    var dateSpan = document.createElement('span');
+    dateSpan.textContent = formatDate(item.created_at);
+    info.appendChild(dateSpan);
+
+    meta.appendChild(prompt);
+    meta.appendChild(info);
+
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+
+    var downloadLink = document.createElement('a');
+    downloadLink.href = downloadUrl;
+    downloadLink.setAttribute('download', '');
+    downloadLink.textContent = 'Download';
+
+    var deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', function () {
+      if (armed && armed.btn === deleteBtn) {
+        deleteItem(item);
+      } else {
+        armDelete(div);
+      }
+    });
+
+    actions.appendChild(downloadLink);
+    actions.appendChild(deleteBtn);
+
+    div.appendChild(img);
+    div.appendChild(meta);
+    div.appendChild(actions);
+    return div;
+  }
+
   function renderGallery(items) {
-    var gallery = qs('#gallery');
-    gallery.innerHTML = '';
+    galleryEl.replaceChildren();
     if (!items.length) {
-      gallery.innerHTML = '<p style="color:#666;grid-column:1/-1">No items match your filters.</p>';
+      var empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'No items match your filters.';
+      galleryEl.appendChild(empty);
       return;
     }
-    items.forEach(function(item) {
-      var downloadUrl = '/gallery/' + encodeURIComponent(item.id) + '/download';
-      var div = document.createElement('div');
-      div.className = 'item';
-      div.innerHTML =
-        '<img src="' + downloadUrl + '" alt="" loading="lazy">' +
-        '<div class="meta">' +
-          '<div class="prompt">' + escapeText(item.prompt || '(no prompt)') + '</div>' +
-          '<div class="info">' +
-            escapeText(item.model || '') +
-            (item.model ? ' &middot; ' : '') +
-            escapeText(formatDate(item.created_at)) +
-          '</div>' +
-        '</div>' +
-        '<div class="actions">' +
-          '<a href="' + downloadUrl + '" download>Download</a>' +
-          '<button data-id="' + escapeText(item.id) + '">Delete</button>' +
-        '</div>';
-      div.querySelector('button').addEventListener('click', function() {
-        deleteItem(item.id);
-      });
-      gallery.appendChild(div);
+    items.forEach(function (item) {
+      galleryEl.appendChild(makeItemNode(item));
     });
   }
 
   function renderPagination() {
     var pg = qs('#pagination');
-    pg.innerHTML = '';
+    pg.replaceChildren();
     var pages = Math.ceil(state.total / PAGE_LIMIT) || 1;
     var current = Math.floor(state.offset / PAGE_LIMIT);
 
     var prev = document.createElement('button');
-    prev.textContent = '← Prev';
+    prev.type = 'button';
+    prev.textContent = 'Previous page';
     prev.disabled = current === 0;
-    prev.addEventListener('click', function() {
+    prev.addEventListener('click', function () {
       state.offset = Math.max(0, state.offset - PAGE_LIMIT);
       load();
     });
 
     var info = document.createElement('span');
     info.className = 'page-info';
-    info.textContent = 'Page ' + (current + 1) + ' / ' + pages;
+    info.textContent = 'Page ' + (current + 1) + ' of ' + pages;
 
     var next = document.createElement('button');
-    next.textContent = 'Next →';
+    next.type = 'button';
+    next.textContent = 'Next page';
     next.disabled = state.offset + PAGE_LIMIT >= state.total;
-    next.addEventListener('click', function() {
+    next.addEventListener('click', function () {
       state.offset += PAGE_LIMIT;
       load();
     });
@@ -172,21 +267,77 @@
     pg.appendChild(next);
   }
 
-  function deleteItem(id) {
-    fetch('/gallery/' + encodeURIComponent(id), { method: 'DELETE' })
-      .then(function(r) {
-        if (r.ok) {
-          load();
-        } else {
-          qs('#status').textContent = 'Delete failed (status ' + r.status + ').';
-        }
+  function load(suffix) {
+    galleryEl.setAttribute('aria-busy', 'true');
+    setStatus('Loading gallery…');
+    fetch(buildUrl())
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
       })
-      .catch(function(err) {
-        qs('#status').textContent = 'Delete error: ' + err.message;
+      .then(function (data) {
+        state.total = data.total || 0;
+        renderGallery(data.data || []);
+        renderPagination();
+        setStatus(data.total + ' item(s) found.' + (suffix || ''));
+      })
+      .catch(function (err) {
+        setStatus('Error loading gallery: ' + err.message, true);
+      })
+      .finally(function () {
+        galleryEl.removeAttribute('aria-busy');
       });
   }
 
-  qs('#btn-filter').addEventListener('click', function() {
+  // Inline, keyboard-operable delete confirmation. Activating "Delete" turns
+  // it into "Confirm delete" plus a "Cancel" button; Escape or Cancel restores.
+  function disarmDelete(focusButton) {
+    if (!armed) return;
+    var btn = armed.btn;
+    btn.textContent = 'Delete';
+    btn.classList.remove('confirm');
+    if (armed.cancel && armed.cancel.parentNode === btn.parentNode) {
+      btn.parentNode.removeChild(armed.cancel);
+    }
+    armed = null;
+    if (focusButton) btn.focus();
+  }
+
+  function armDelete(div) {
+    disarmDelete(false);
+    var btn = div.querySelector('.actions button');
+    btn.textContent = 'Confirm delete';
+    btn.classList.add('confirm');
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', function () { disarmDelete(true); });
+    btn.parentNode.appendChild(cancel);
+    armed = { btn: btn, cancel: cancel };
+    btn.focus();
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && armed) disarmDelete(true);
+  });
+
+  function deleteItem(item) {
+    fetch('/gallery/' + encodeURIComponent(item.id), { method: 'DELETE' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        armed = null;
+        // Re-render, then return focus to the still-visible section heading.
+        load(' Item deleted.');
+        galleryTitleEl.focus();
+      })
+      .catch(function (err) {
+        disarmDelete(true);
+        setStatus('Delete failed: ' + err.message, true);
+      });
+  }
+
+  qs('#filters').addEventListener('submit', function (e) {
+    e.preventDefault();
     state.offset = 0;
     state.prompt   = qs('#f-prompt').value;
     state.model    = qs('#f-model').value;
@@ -195,7 +346,7 @@
     load();
   });
 
-  qs('#btn-clear').addEventListener('click', function() {
+  qs('#btn-clear').addEventListener('click', function () {
     qs('#f-prompt').value = '';
     qs('#f-model').value  = '';
     qs('#f-from').value   = '';

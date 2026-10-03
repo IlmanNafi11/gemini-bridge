@@ -54,7 +54,17 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Spawn an in-process server with no API key configured.
 async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHandle<()> {
+    spawn_server_with_key(port, store, None).await
+}
+
+/// Same as `spawn_server` but with a configured API key for auth-matrix tests.
+async fn spawn_server_with_key(
+    port: u16,
+    store: LocalMediaStore,
+    api_key: Option<String>,
+) -> tokio::task::JoinHandle<()> {
     let gallery_service: Arc<dyn GalleryService> =
         Arc::new(DefaultGalleryService::new(Arc::new(store)));
     let state = AppState {
@@ -63,6 +73,7 @@ async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHan
         image_service: None,
         video_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(None),
+        identity_service: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: Some(gallery_service),
@@ -70,7 +81,7 @@ async fn spawn_server(port: u16, store: LocalMediaStore) -> tokio::task::JoinHan
     };
     let config = ServerConfig {
         bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
-        api_key: None,
+        api_key,
         require_key_for_admin: false,
         cors_enabled: false,
         rate_limit: None,
@@ -423,31 +434,36 @@ async fn gallery_delete_unknown_id_returns_404() {
     srv.abort();
 }
 
-/// format=html returns text/html with gallery UI controls.
+/// format=html returns the embedded UI with its script/style hashes and leaves
+/// the default CSP unchanged on JSON/API responses.
 #[tokio::test]
-async fn gallery_html_format_returns_html() {
+async fn gallery_html_csp_allows_only_embedded_inline_assets() {
     let temp = TempDir::new().unwrap();
     let store = LocalMediaStore::new(temp.path());
     let port = free_port();
     let srv = spawn_server(port, store).await;
 
-    let resp = reqwest::get(format!("http://127.0.0.1:{port}/gallery?format=html"))
+    let client = reqwest::Client::new();
+    let html = client
+        .get(format!("http://127.0.0.1:{port}/gallery?format=html"))
+        .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let content_type = resp.headers()["content-type"].to_str().unwrap().to_string();
-    assert!(content_type.starts_with("text/html"));
-    let html = resp.text().await.unwrap();
-    // Must contain recognisable gallery UI tokens.
-    assert!(html.contains("gallery") || html.contains("Gallery"));
-    // Must not reference external hosts.
-    assert!(!html.contains("https://cdn.") && !html.contains("https://fonts.google"));
+    assert_eq!(html.status(), reqwest::StatusCode::OK);
+    let csp = html.headers()["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("style-src 'sha256-"));
+    assert!(csp.contains("script-src 'sha256-"));
+    assert!(!csp.contains("unsafe-inline") && !csp.contains("*"));
 
-    let invalid = reqwest::get(format!("http://127.0.0.1:{port}/gallery?format=xml"))
+    let json = client
+        .get(format!("http://127.0.0.1:{port}/gallery"))
+        .send()
         .await
         .unwrap();
-    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
-
+    assert_eq!(
+        json.headers()["content-security-policy"],
+        "default-src 'none'"
+    );
     srv.abort();
 }
 
@@ -476,6 +492,229 @@ async fn gallery_url_field_is_same_origin() {
     // Must start with /gallery/ — no scheme, no external host.
     assert!(url.starts_with("/gallery/"), "url={url}");
     assert!(url.contains(&id));
+
+    srv.abort();
+}
+
+// ── Auth matrix ───────────────────────────────────────────────────────────────
+
+/// Gallery GET routes honor the configured API key: rejected without or with a
+/// wrong Bearer token, allowed with the correct one.
+#[tokio::test]
+async fn gallery_list_and_download_require_api_key_when_configured() {
+    let temp = TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let id = store
+        .put(
+            Bytes::from_static(PNG),
+            make_meta("image/png", None, None, 1000),
+        )
+        .await
+        .unwrap();
+    let port = free_port();
+    let srv = spawn_server_with_key(port, store, Some("secret".to_string())).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let no_key_list = reqwest::get(format!("{base}/gallery")).await.unwrap();
+    assert_eq!(no_key_list.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let no_key_download = reqwest::get(format!("{base}/gallery/{id}/download"))
+        .await
+        .unwrap();
+    assert_eq!(no_key_download.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let client = reqwest::Client::new();
+    let wrong_key = client
+        .get(format!("{base}/gallery"))
+        .bearer_auth("wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_key.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let ok_list = client
+        .get(format!("{base}/gallery"))
+        .bearer_auth("secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_list.status(), reqwest::StatusCode::OK);
+    let ok_download = client
+        .get(format!("{base}/gallery/{id}/download"))
+        .bearer_auth("secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_download.status(), reqwest::StatusCode::OK);
+
+    srv.abort();
+}
+
+/// Deletion of a specific gallery item honors the API key when configured.
+#[tokio::test]
+async fn gallery_delete_requires_api_key_when_configured() {
+    let temp = TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let id = store
+        .put(
+            Bytes::from_static(PNG),
+            make_meta("image/png", None, None, 1000),
+        )
+        .await
+        .unwrap();
+    let port = free_port();
+    let srv = spawn_server_with_key(port, store, Some("secret".to_string())).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let no_key = client
+        .delete(format!("{base}/gallery/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_key.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let wrong_key = client
+        .delete(format!("{base}/gallery/{id}"))
+        .bearer_auth("wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_key.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let ok = client
+        .delete(format!("{base}/gallery/{id}"))
+        .bearer_auth("secret")
+        .header("origin", "https://evil.example")
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+
+    srv.abort();
+}
+
+/// Unauthenticated loopback routes remain usable by native clients, but a
+/// browser-originated cross-site delete is rejected.
+#[tokio::test]
+async fn gallery_delete_rejects_hostile_browser_origin_but_allows_native_client() {
+    let temp = TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let first_id = store
+        .put(
+            Bytes::from_static(PNG),
+            make_meta("image/png", None, None, 1000),
+        )
+        .await
+        .unwrap();
+    let second_id = store
+        .put(
+            Bytes::from_static(PNG),
+            make_meta("image/png", None, None, 1001),
+        )
+        .await
+        .unwrap();
+    let port = free_port();
+    let srv = spawn_server(port, store).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let denied = client
+        .delete(format!("{base}/gallery/{first_id}"))
+        .header("origin", "https://evil.example")
+        .header("sec-fetch-site", "cross-site")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: serde_json::Value = denied.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "cross_origin_request");
+
+    let allowed = client
+        .delete(format!("{base}/gallery/{second_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        allowed.json::<serde_json::Value>().await.unwrap()["deleted"],
+        second_id
+    );
+    srv.abort();
+}
+
+// ── Accessible UI and hostile content rendering ───────────────────────────────
+
+/// The served gallery page carries the accessible markup and injection-safe
+/// rendering guarantees.
+#[tokio::test]
+async fn gallery_html_has_accessible_landmarks_and_labels() {
+    let temp = TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let port = free_port();
+    let srv = spawn_server(port, store).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/gallery?format=html"))
+        .await
+        .unwrap();
+    let html = resp.text().await.unwrap();
+
+    assert_eq!(html.matches("<main").count(), 1);
+    assert!(html.contains("role=\"status\" aria-live=\"polite\""));
+    for id in ["f-prompt", "f-model", "f-from", "f-to"] {
+        assert!(
+            html.contains(&format!("for=\"{id}\"")),
+            "missing label for {id}"
+        );
+        assert!(html.contains(&format!("id=\"{id}\"")), "missing input {id}");
+    }
+    assert!(html.contains(":focus-visible"));
+    assert!(html.contains("Confirm delete"));
+    // Rendering path is DOM-based only; no markup-string sinks ship to the page.
+    assert!(!html.contains("innerHTML"));
+    assert!(!html.contains("insertAdjacentHTML"));
+
+    srv.abort();
+}
+
+/// Hostile prompt/model/id strings round-trip as plain JSON text and are never
+/// reflected into the served document as markup.
+#[tokio::test]
+async fn gallery_hostile_prompt_model_remain_plain_text() {
+    let temp = TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let hostile_prompt = "<img src=x onerror=alert(1)><script>alert(2)</script>";
+    let hostile_model = "\" onmouseover=alert(3) data-x=\"";
+    store
+        .put(
+            Bytes::from_static(PNG),
+            make_meta("image/png", Some(hostile_prompt), Some(hostile_model), 1000),
+        )
+        .await
+        .unwrap();
+    let port = free_port();
+    let srv = spawn_server(port, store).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/gallery"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data[0]["prompt"].as_str().unwrap(), hostile_prompt);
+    assert_eq!(data[0]["model"].as_str().unwrap(), hostile_model);
+
+    // The page itself is static: hostile content never becomes part of it, and
+    // rendering happens via DOM text nodes, not HTML string sinks.
+    let html = reqwest::get(format!("http://127.0.0.1:{port}/gallery?format=html"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!html.contains("<script>alert(2)</script>"));
+    assert!(!html.contains("onerror=alert"));
+    assert!(!html.contains("innerHTML"));
 
     srv.abort();
 }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use gemini_bridge_media_store::{MediaMetadata, MediaStore, StoreError};
+use gemini_bridge_media_store::{MediaMetadata, MediaStore, MetadataFilter, StoreError};
 
 use crate::{GalleryError, GalleryItem, GalleryQuery, GalleryResponse, GalleryService};
 
@@ -38,35 +38,25 @@ impl GalleryService for DefaultGalleryService {
             ));
         }
 
-        let all_records = self.store.list(usize::MAX, 0).await;
+        let page = self
+            .store
+            .list_filtered(
+                MetadataFilter {
+                    prompt_contains: query.prompt,
+                    model: query.model,
+                    created_at_from: query.date_from,
+                    created_at_to: query.date_to,
+                },
+                limit,
+                offset,
+            )
+            .await
+            .map_err(|error| GalleryError::StoreError(error.to_string()))?;
 
-        let filtered: Vec<GalleryItem> = all_records
+        let total = page.total;
+        let data = page
+            .items
             .into_iter()
-            .filter(|meta| {
-                if let Some(ref p) = query.prompt {
-                    let prompt_text = meta.prompt.as_deref().unwrap_or("");
-                    if !prompt_text.to_lowercase().contains(&p.to_lowercase()) {
-                        return false;
-                    }
-                }
-                if let Some(ref m) = query.model {
-                    let model_text = meta.model.as_deref().unwrap_or("");
-                    if model_text != m {
-                        return false;
-                    }
-                }
-                if let Some(from) = query.date_from
-                    && meta.created_at < from
-                {
-                    return false;
-                }
-                if let Some(to) = query.date_to
-                    && meta.created_at > to
-                {
-                    return false;
-                }
-                true
-            })
             .map(|meta| GalleryItem {
                 url: format!("/gallery/{}/download", meta.id),
                 id: meta.id,
@@ -77,9 +67,6 @@ impl GalleryService for DefaultGalleryService {
                 size_bytes: meta.size_bytes,
             })
             .collect();
-
-        let total = filtered.len();
-        let data = filtered.into_iter().skip(offset).take(limit).collect();
 
         Ok(GalleryResponse {
             data,

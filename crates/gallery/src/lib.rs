@@ -83,12 +83,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_html_has_gallery_controls_and_no_external_assets() {
+    fn embedded_html_is_accessible_local_and_injection_safe() {
         let html = gallery_html();
-        assert!(html.contains("id=\"gallery\""));
-        assert!(html.contains("id=\"btn-filter\""));
-        assert!(html.contains("fetch('/gallery"));
+
+        assert!(html.contains("fetch(buildUrl())"));
+        assert!(html.contains("<section id=\"gallery-section\""));
+        assert!(html.contains("<nav id=\"pagination\" aria-label=\"Gallery pages\""));
+        assert!(html.contains("<label for=\"f-prompt\">"));
+        assert!(html.contains("<label for=\"f-model\">"));
+        assert!(html.contains("<label for=\"f-from\">"));
+        assert!(html.contains("<label for=\"f-to\">"));
+        assert!(html.contains("role=\"status\" aria-live=\"polite\""));
+        assert!(html.contains(":focus-visible"));
+        assert!(html.contains("e.key === 'Escape'"));
+        assert!(html.contains("Confirm delete"));
+
+        // Metadata is inserted through DOM text nodes/properties, never parsed as markup.
+        assert!(html.contains("prompt.textContent = item.prompt"));
+        assert!(html.contains("modelSpan.textContent = item.model"));
+        assert!(html.contains("encodeURIComponent(item.id)"));
+        assert!(!html.contains("innerHTML"));
+        assert!(!html.contains("insertAdjacentHTML"));
+        assert!(!html.contains("document.write"));
+
         assert!(!html.contains("https://"));
         assert!(!html.contains("http://"));
+        assert!(!html.contains("<link "));
+        assert!(!html.contains("<script src="));
+    }
+
+    #[test]
+    fn hostile_metadata_strings_are_not_part_of_the_embedded_document() {
+        let html = gallery_html();
+        for hostile in [
+            "<script>alert('prompt')</script>",
+            "<img src=x onerror=alert('model')>",
+            "\" onmouseover=alert('id') data-x=\"",
+        ] {
+            assert!(!html.contains(hostile));
+        }
     }
 }
