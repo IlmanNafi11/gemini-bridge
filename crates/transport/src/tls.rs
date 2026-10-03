@@ -1,6 +1,10 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
 use std::str::FromStr;
 
+/// HTTP header presets that resemble browser requests.
+///
+/// These presets do not modify TLS ClientHello parameters and do not provide
+/// JA3/TLS fingerprint impersonation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TlsProfile {
     #[default]
@@ -22,7 +26,7 @@ impl FromStr for TlsProfile {
 }
 
 impl TlsProfile {
-    /// Return the User-Agent string for this profile.
+    /// Return the preset User-Agent string. This is an HTTP header, not a TLS profile.
     pub fn user_agent(&self) -> &'static str {
         match self {
             Self::Chrome => {
@@ -130,5 +134,14 @@ impl TlsProfile {
                 headers.insert(k, v);
             }
         }
+    }
+
+    /// Returns whether this build changes TLS ClientHello parameters.
+    ///
+    /// The reqwest/rustls stack currently supports HTTP header presets only;
+    /// a real JA3 profile requires a different TLS client implementation and
+    /// is intentionally not reported as available here.
+    pub const fn has_client_hello_impersonation(&self) -> bool {
+        false
     }
 }

@@ -269,6 +269,7 @@ pub enum OpenAiCompatError {
    | `LlmError::Unavailable` | 503 | `service_unavailable` | — |
    | `LlmError::Unsupported(_)` | 400 | `invalid_request_error` | — |
    | `LlmError::Protocol(_)` | 502 | `provider_error` | — |
+   | `LlmError::ContinuityRejected` | 410 | `invalid_request_error` | `continuity_rejected` |
    | Unknown model | 400 | `invalid_request_error` | `model_not_found` |
 
 6. **No Side Effects:** This crate performs pure serialization/deserialization and computation. It makes no I/O calls.

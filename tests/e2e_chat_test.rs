@@ -6,12 +6,159 @@
 
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
+use futures::stream;
+use gemini_bridge_http_server::{AppState, ServerConfig, ServerOptions, build_router_with_options};
+use gemini_bridge_llm_service::{
+    Completion, LlmAdapter, LlmError, LlmEvent, LlmEventStream, LlmRequest,
+};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use gemini_bridge_http_server::{AppState, ServerConfig, build_router};
+struct PendingStreamAdapter {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl LlmAdapter for PendingStreamAdapter {
+    fn provider_id(&self) -> &'static str {
+        "pending-stream"
+    }
+
+    async fn complete(&self, _request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        Err(LlmError::Unavailable)
+    }
+
+    async fn stream(&self, _request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Ok(Box::pin(stream::unfold(
+            Some((entered, release, false)),
+            |state| async move {
+                let (entered, release, waiting) = state?;
+                if waiting {
+                    entered.notify_one();
+                    release.notified().await;
+                    None
+                } else {
+                    Some((
+                        Ok(LlmEvent::TextDelta("first visible token".to_owned())),
+                        Some((entered, release, true)),
+                    ))
+                }
+            },
+        )))
+    }
+}
+
+#[tokio::test]
+async fn first_http_sse_event_arrives_before_upstream_stream_completes() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (mut state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    state.adapter = Arc::new(PendingStreamAdapter {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    spawn_server(state, srv_config).await;
+
+    let request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&json!({
+                "model": "gemini-web-flash",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap()
+    });
+
+    let mut response = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .expect("HTTP headers should arrive without waiting for the first stream event")
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+
+    let first_chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+        .await
+        .expect("SSE event should arrive while adapter stream remains blocked")
+        .unwrap()
+        .expect("response should contain an SSE event");
+    let event = String::from_utf8(first_chunk.to_vec()).unwrap();
+    assert!(
+        event.contains("first visible token"),
+        "unexpected event: {event}"
+    );
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("adapter must still be waiting for upstream completion");
+
+    release.notify_one();
+    let rest = tokio::time::timeout(Duration::from_secs(2), response.text())
+        .await
+        .expect("SSE response should finish after releasing upstream")
+        .unwrap();
+    assert!(rest.contains("data: [DONE]"));
+}
+
+struct SilentStreamAdapter;
+
+#[async_trait]
+impl LlmAdapter for SilentStreamAdapter {
+    fn provider_id(&self) -> &'static str {
+        "silent-stream"
+    }
+
+    async fn complete(&self, _request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        Err(LlmError::Unavailable)
+    }
+
+    async fn stream(&self, _request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
+#[tokio::test]
+async fn idle_http_sse_stream_emits_keepalive_comment() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (mut state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    state.adapter = Arc::new(SilentStreamAdapter);
+    spawn_server(state, srv_config).await;
+
+    let mut response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let keepalive = tokio::time::timeout(Duration::from_secs(17), response.chunk())
+        .await
+        .expect("idle SSE stream must emit a keepalive")
+        .unwrap()
+        .expect("keepalive response chunk");
+    let keepalive = String::from_utf8(keepalive.to_vec()).unwrap();
+    assert!(
+        keepalive.starts_with(':'),
+        "expected SSE comment, got {keepalive:?}"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,8 +223,7 @@ async fn make_state(
             bind_addr: "127.0.0.1".to_string(),
             port,
             api_key: api_key.clone(),
-            cors_enabled: false,
-            metrics_enabled: false,
+            ..BridgeSrvCfg::default()
         },
         storage: StorageConfig {
             data_dir,
@@ -117,6 +263,7 @@ async fn make_state(
             image_service: None,
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(Some(identity.clone())),
+            identity_service: Some(identity.clone()),
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
@@ -128,7 +275,15 @@ async fn make_state(
 
 /// Spawn an Axum server on the given config, returning quickly.
 async fn spawn_server(state: AppState, srv_config: ServerConfig) {
-    let router = build_router(srv_config.clone(), state);
+    spawn_server_with_options(state, srv_config, ServerOptions::default()).await;
+}
+
+async fn spawn_server_with_options(
+    state: AppState,
+    srv_config: ServerConfig,
+    options: ServerOptions,
+) {
+    let router = build_router_with_options(srv_config.clone(), state, options);
     let listener = tokio::net::TcpListener::bind(&srv_config.bind_addr)
         .await
         .unwrap();
@@ -265,13 +420,28 @@ async fn api_key_is_enforced_when_configured() {
         .unwrap();
     assert_eq!(resp_wrong_key.status(), 401);
 }
+#[tokio::test]
+async fn wrong_admin_key_is_rejected_with_constant_time_compare() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, Some("secret-key".into())).await;
+    spawn_server(state, srv_config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/admin/status"))
+        .header("Authorization", "Bearer secret-keX")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
 
 // ---------------------------------------------------------------------------
 // Test: x-request-id header propagated in response
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn request_id_is_echoed_in_response() {
+async fn request_id_echoes_valid_input_and_generates_uuid_v4_when_absent() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("^/app"))
@@ -290,17 +460,179 @@ async fn request_id_is_echoed_in_response() {
     let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
     spawn_server(state, srv_config).await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .json(&json!({"model":"gemini-web-flash","messages":[{"role":"user","content":"hi"}]}))
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let body = json!({"model":"gemini-web-flash","messages":[{"role":"user","content":"hi"}]});
+    let incoming = "client-request-01";
+    let echoed = client
+        .post(&url)
+        .header("x-request-id", incoming)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(echoed.headers()["x-request-id"], incoming);
+
+    let generated = client.post(url).json(&body).send().await.unwrap();
+    let request_id = generated.headers()["x-request-id"].to_str().unwrap();
+    assert!(
+        is_uuid_v4(request_id),
+        "generated request ID was {request_id:?}"
+    );
+}
+
+fn is_uuid_v4(value: &str) -> bool {
+    value.len() == 36
+        && value.as_bytes()[8] == b'-'
+        && value.as_bytes()[13] == b'-'
+        && value.as_bytes()[18] == b'-'
+        && value.as_bytes()[23] == b'-'
+        && value.as_bytes()[14] == b'4'
+        && matches!(
+            value.as_bytes()[19].to_ascii_lowercase(),
+            b'8' | b'9' | b'a' | b'b'
+        )
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+#[tokio::test]
+async fn responses_include_security_headers_and_restrict_cors_origin() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    let origin = format!("http://127.0.0.1:{port}");
+    let options = ServerOptions {
+        cors_origins: vec![origin.clone()],
+        concurrency_limit: 4,
+        body_limit_bytes: 10 * 1024 * 1024,
+    };
+    let mut srv_config = srv_config;
+    srv_config.cors_enabled = true;
+    spawn_server_with_options(state, srv_config, options).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .header("origin", origin.clone())
         .send()
         .await
         .unwrap();
 
-    assert!(
-        resp.headers().contains_key("x-request-id"),
-        "x-request-id header must be present in response"
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["x-frame-options"], "DENY");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'"
     );
+    assert_eq!(response.headers()["access-control-allow-origin"], origin);
+
+    let denied = client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .header("origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(!denied.headers().contains_key("access-control-allow-origin"));
+}
+#[tokio::test]
+async fn malformed_authorization_headers_are_rejected() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, Some("secret-key".into())).await;
+    spawn_server(state, srv_config).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+
+    // Bearer scheme with trailing whitespace inside the token must not match.
+    let resp = client
+        .post(&url)
+        .header("Authorization", "Bearer secret-key ")
+        .json(&json!({"model":"gemini-web-flash","messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Empty token must not match.
+    let resp = client
+        .post(&url)
+        .header("Authorization", "Bearer ")
+        .json(&json!({"model":"gemini-web-flash","messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Non-bearer schemes are rejected.
+    let resp = client
+        .post(&url)
+        .header("Authorization", "Basic c2VjcmV0LWtleQ==")
+        .json(&json!({"model":"gemini-web-flash","messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // The scheme must use the canonical `Bearer ` spelling.
+    let resp = client
+        .post(&url)
+        .header("Authorization", "bearer secret-key")
+        .json(&json!({"model":"gpt-5","messages":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn oversized_request_body_is_rejected() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    let options = ServerOptions {
+        cors_origins: vec![],
+        concurrency_limit: 4,
+        body_limit_bytes: 1024 * 1024,
+    };
+    spawn_server_with_options(state, srv_config, options).await;
+
+    let huge = "x".repeat(2 * 1024 * 1024);
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": huge}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 413);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+}
+#[tokio::test]
+async fn unsupported_method_returns_openai_error_envelope() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    spawn_server(state, srv_config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 405);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(body["error"]["code"], "method_not_allowed");
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +663,129 @@ async fn unknown_model_returns_openai_error_shape() {
         body["error"]["type"].is_string(),
         "error.type must be a string"
     );
+}
+
+#[derive(Clone, Copy)]
+enum FailureKind {
+    Authentication,
+    RateLimited,
+    Unavailable,
+    Unsupported,
+    ContinuityRejected,
+    Protocol,
+}
+
+struct FailingAdapter(FailureKind);
+
+impl FailingAdapter {
+    fn error(&self) -> LlmError {
+        match self.0 {
+            FailureKind::Authentication => LlmError::Authentication,
+            FailureKind::RateLimited => LlmError::RateLimited,
+            FailureKind::Unavailable => LlmError::Unavailable,
+            FailureKind::Unsupported => LlmError::Unsupported("test capability"),
+            FailureKind::ContinuityRejected => LlmError::ContinuityRejected,
+            FailureKind::Protocol => LlmError::Protocol("invalid upstream frame".to_owned()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmAdapter for FailingAdapter {
+    fn provider_id(&self) -> &'static str {
+        "failing"
+    }
+
+    async fn complete(&self, _request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        Err(self.error())
+    }
+
+    async fn stream(&self, _request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        Err(self.error())
+    }
+}
+
+#[tokio::test]
+async fn llm_errors_map_to_stable_http_status_type_and_code() {
+    let cases = [
+        (
+            FailureKind::Authentication,
+            401,
+            "authentication_error",
+            Some("invalid_api_key"),
+        ),
+        (
+            FailureKind::RateLimited,
+            429,
+            "rate_limit_exceeded",
+            Some("rate_limit_exceeded"),
+        ),
+        (FailureKind::Unavailable, 503, "service_unavailable", None),
+        (FailureKind::Unsupported, 400, "invalid_request_error", None),
+        (
+            FailureKind::ContinuityRejected,
+            410,
+            "invalid_request_error",
+            None,
+        ),
+        (FailureKind::Protocol, 502, "provider_error", None),
+    ];
+
+    for (kind, expected_status, expected_type, expected_code) in cases {
+        let mock_server = MockServer::start().await;
+        let port = free_port();
+        let (mut state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+        state.adapter = Arc::new(FailingAdapter(kind));
+        spawn_server(state, srv_config).await;
+
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .json(&json!({
+                "model": "gemini-web-flash",
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status().as_u16(), expected_status);
+        let envelope: Value = response.json().await.unwrap();
+        assert!(envelope["error"]["message"].is_string());
+        assert_eq!(envelope["error"]["type"], expected_type);
+        assert_eq!(envelope["error"]["code"].as_str(), expected_code);
+    }
+}
+
+#[tokio::test]
+async fn stream_with_conversation_id_is_rejected_before_starting_sse() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    spawn_server(state, srv_config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "conversation_id": "conversation-01"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+    assert_ne!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let envelope: Value = response.json().await.unwrap();
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
+    assert_eq!(envelope["error"]["code"], Value::Null);
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +819,156 @@ fn parse_sse(raw: &str) -> (Vec<String>, bool) {
         }
     }
     (data_lines, has_done)
+}
+struct ErrorStreamAdapter;
+
+#[async_trait]
+impl LlmAdapter for ErrorStreamAdapter {
+    fn provider_id(&self) -> &'static str {
+        "error-stream"
+    }
+
+    async fn complete(&self, _request: Arc<LlmRequest>) -> Result<Completion, LlmError> {
+        Err(LlmError::Unavailable)
+    }
+
+    async fn stream(&self, _request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
+        Ok(Box::pin(stream::iter([
+            Ok(LlmEvent::TextDelta("before error".to_owned())),
+            Err(LlmError::Protocol("bad \"frame\"".to_owned())),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn midstream_error_is_final_json_event_without_done_sentinel() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (mut state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    state.adapter = Arc::new(ErrorStreamAdapter);
+    spawn_server(state, srv_config).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&json!({
+            "model": "gemini-web-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let raw = response.text().await.unwrap();
+    let (data, has_done) = parse_sse(&raw);
+    assert!(
+        !has_done,
+        "failed stream must not advertise clean completion"
+    );
+    assert_eq!(data.len(), 2);
+    let error: Value = serde_json::from_str(&data[1]).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("bad \"frame\""));
+}
+
+#[tokio::test]
+async fn concurrency_limit_one_rejects_second_stream_until_first_drains() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (mut state, srv_config) = make_state(&mock_server.uri(), port, None).await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    state.adapter = Arc::new(PendingStreamAdapter {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let options = ServerOptions {
+        cors_origins: vec![],
+        concurrency_limit: 1,
+        body_limit_bytes: 1024 * 1024,
+    };
+    spawn_server_with_options(state, srv_config, options).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let body = json!({
+        "model": "gemini-web-flash",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "stream": true
+    });
+    let first = tokio::spawn({
+        let client = client.clone();
+        let url = url.clone();
+        let body = body.clone();
+        async move { client.post(url).json(&body).send().await.unwrap() }
+    });
+    entered.notified().await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .expect("first stream should open")
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let overloaded = client.post(&url).json(&body).send().await.unwrap();
+    assert_eq!(overloaded.status(), 503);
+    let envelope: Value = overloaded.json().await.unwrap();
+    assert_eq!(envelope["error"]["message"], "Server is overloaded");
+    assert_eq!(envelope["error"]["type"], "service_unavailable");
+    assert_eq!(envelope["error"]["code"], "server_overloaded");
+
+    release.notify_one();
+    let drained = tokio::time::timeout(Duration::from_secs(2), first.text())
+        .await
+        .expect("first stream must finish once released")
+        .unwrap();
+    assert!(drained.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn configured_cors_allows_chat_preflight_from_allowed_origin() {
+    let mock_server = MockServer::start().await;
+    let port = free_port();
+    let (state, mut srv_config) = make_state(&mock_server.uri(), port, None).await;
+    srv_config.cors_enabled = true;
+    let origin = format!("http://127.0.0.1:{port}");
+    let options = ServerOptions {
+        cors_origins: vec![origin.clone()],
+        concurrency_limit: 4,
+        body_limit_bytes: 1024 * 1024,
+    };
+    spawn_server_with_options(state, srv_config, options).await;
+
+    let response = reqwest::Client::new()
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        )
+        .header("origin", &origin)
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(response.headers()["access-control-allow-origin"], origin);
+    assert!(
+        response.headers()["access-control-allow-methods"]
+            .to_str()
+            .unwrap()
+            .contains("POST")
+    );
+    assert!(
+        response.headers()["access-control-allow-headers"]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("content-type")
+    );
 }
 
 #[tokio::test]

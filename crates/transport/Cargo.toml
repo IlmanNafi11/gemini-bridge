@@ -11,6 +11,7 @@ url = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 gemini-bridge-config = { path = "../config" }
 

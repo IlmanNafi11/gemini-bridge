@@ -21,15 +21,18 @@ use gemini_bridge_identity::{DefaultIdentityService, IdentityError, IdentityServ
 use gemini_bridge_llm_service::{
     Completion, ContentPart, LlmAdapter, LlmError, LlmEventStream, LlmRequest, Role,
 };
-use gemini_bridge_transport::{Idempotency, ReqwestTransport, TransportRequest, TransportService};
+use gemini_bridge_transport::{
+    Idempotency, ReqwestTransport, TransportRequest, TransportService, TransportStreamResponse,
+};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use schema::GeminiWebSchema;
+use self_check::run_self_check;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 
-use schema::GeminiWebSchema;
-
+const SAMPLE_FIXTURE: &str = include_str!("../fixtures/sample_response.txt");
 const GEMINI_BASE_URL: &str = "https://gemini.google.com";
 const STREAM_GENERATE_PATH: &str =
     "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
@@ -113,12 +116,20 @@ impl DefaultGeminiAdapter {
         identity: Arc<DefaultIdentityService>,
         config: Arc<BridgeConfig>,
     ) -> Result<Self, GeminiAdapterError> {
-        Self::with_base_url_and_schema(
-            identity,
-            config,
-            GEMINI_BASE_URL,
-            GeminiWebSchema::default(),
-        )
+        let schema = Self::bundled_schema()?;
+        Self::with_base_url_and_schema(identity, config, GEMINI_BASE_URL, schema)
+    }
+
+    /// Load and validate the checked-in positional schema, failing fast on
+    /// startup when the bundled contract does not match the sample fixture.
+    fn bundled_schema() -> Result<GeminiWebSchema, GeminiAdapterError> {
+        let schema = GeminiWebSchema::bundled().map_err(|error| {
+            GeminiAdapterError::SchemaMismatch(format!("cannot load bundled schema: {error}"))
+        })?;
+        run_self_check(&schema, SAMPLE_FIXTURE).map_err(|error| {
+            GeminiAdapterError::SchemaMismatch(format!("startup self-check failed: {error}"))
+        })?;
+        Ok(schema)
     }
 
     /// Construct against a custom upstream URL. This keeps localhost wire tests
@@ -148,12 +159,12 @@ impl DefaultGeminiAdapter {
         })
     }
 
-    /// Execute the StreamGenerate upstream request and return the raw response
-    /// body bytes. Both streaming and non-streaming paths share this method.
-    async fn execute_wire_request(
+    /// Build the `StreamGenerate` transport request: bootstrap, prompt envelope,
+    /// auth headers, and the `_reqid`/`rt`/`hl`/`bl` query contract.
+    async fn build_wire_transport_request(
         &self,
         request: &LlmRequest,
-    ) -> Result<Bytes, GeminiAdapterError> {
+    ) -> Result<TransportRequest, GeminiAdapterError> {
         let bootstrap = self
             .identity
             .bootstrap()
@@ -195,51 +206,108 @@ impl DefaultGeminiAdapter {
             HeaderValue::from_static("application/x-www-form-urlencoded;charset=UTF-8"),
         );
 
-        let response = self
-            .transport
-            .execute(TransportRequest {
-                method: Method::POST,
-                url,
-                headers,
-                body: Some(Bytes::from(form_body)),
-                idempotency: Idempotency::NeverRetry,
-            })
-            .await
-            .map_err(|error| GeminiAdapterError::Transport(error.to_string()))?;
+        Ok(TransportRequest {
+            method: Method::POST,
+            url,
+            headers,
+            body: Some(Bytes::from(form_body)),
+            idempotency: Idempotency::NeverRetry,
+        })
+    }
 
-        match response.status {
-            StatusCode::METHOD_NOT_ALLOWED => return Err(GeminiAdapterError::StaleBuildLabel),
-            StatusCode::TOO_MANY_REQUESTS => return Err(GeminiAdapterError::RateLimited),
-            StatusCode::UNAUTHORIZED => return Err(GeminiAdapterError::NeedsAuth),
+    /// Map an upstream `StreamGenerate` status to the adapter error taxonomy.
+    ///
+    /// Shared by the buffered and incremental paths so both surfaces report
+    /// identical errors for the same upstream status.
+    fn check_stream_status(
+        status: StatusCode,
+        headers: &HeaderMap,
+    ) -> Result<(), GeminiAdapterError> {
+        match status {
+            StatusCode::METHOD_NOT_ALLOWED => Err(GeminiAdapterError::StaleBuildLabel),
+            StatusCode::TOO_MANY_REQUESTS => Err(GeminiAdapterError::RateLimited),
+            StatusCode::UNAUTHORIZED => Err(GeminiAdapterError::NeedsAuth),
             StatusCode::FOUND | StatusCode::MOVED_PERMANENTLY => {
-                if response
-                    .headers
+                if headers
                     .get(header::LOCATION)
                     .and_then(|value| value.to_str().ok())
                     .is_some_and(|location| location.contains("sorry"))
                 {
-                    return Err(GeminiAdapterError::IpFlagged);
+                    Err(GeminiAdapterError::IpFlagged)
+                } else {
+                    Ok(())
                 }
             }
-            status if !status.is_success() => {
-                return Err(GeminiAdapterError::Transport(format!(
-                    "upstream returned HTTP {status}"
-                )));
-            }
-            _ => {}
+            status if !status.is_success() => Err(GeminiAdapterError::Transport(format!(
+                "upstream returned HTTP {status}"
+            ))),
+            _ => Ok(()),
         }
+    }
 
+    /// Execute the `StreamGenerate` upstream request and return the raw response
+    /// body bytes. The non-streaming path uses this method.
+    async fn execute_wire_request(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Bytes, GeminiAdapterError> {
+        let transport_request = self.build_wire_transport_request(request).await?;
+        let response = self
+            .transport
+            .execute(transport_request)
+            .await
+            .map_err(|error| GeminiAdapterError::Transport(error.to_string()))?;
+        Self::check_stream_status(response.status, &response.headers)?;
         Ok(response.body)
     }
 
-    /// Execute the wire request with one 405 auto-recovery attempt.
-    ///
-    /// Implements the bounded retry contract from SPEC-health-admin §3.3:
-    ///
-    /// 1. Initial attempt.
-    /// 2. On `StaleBuildLabel` (405): refresh bootstrap once via `identity`, retry exactly once.
-    /// 3. If the retry also fails with 405: return a `SchemaMismatch` (maps to 502 Bad Gateway).
-    /// 4. Any other error propagates immediately — 429/IpFlagged never enter this path.
+    /// Execute the `StreamGenerate` upstream request and return the response
+    /// with its body still open as an incremental byte stream. The streaming
+    /// path uses this method; dropping the body stream cancels the upstream read.
+    async fn execute_wire_stream_request(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<TransportStreamResponse, GeminiAdapterError> {
+        let transport_request = self.build_wire_transport_request(request).await?;
+        let response = self
+            .transport
+            .execute_stream(transport_request)
+            .await
+            .map_err(|error| GeminiAdapterError::Transport(error.to_string()))?;
+        Self::check_stream_status(response.status, &response.headers)?;
+        Ok(response)
+    }
+
+    async fn execute_wire_stream_with_recovery(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<TransportStreamResponse, GeminiAdapterError> {
+        match self.execute_wire_stream_request(request).await {
+            Ok(response) => Ok(response),
+            Err(GeminiAdapterError::StaleBuildLabel) => {
+                self.identity
+                    .refresh_1psidts()
+                    .await
+                    .map_err(map_identity_error)?;
+                self.execute_wire_stream_request(request).await
+            }
+            other => other,
+        }
+    }
+
+    async fn stream_events(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<LlmEventStream, GeminiAdapterError> {
+        let response = self.execute_wire_stream_with_recovery(request).await?;
+        Ok(crate::stream::parse_stream(
+            response.body,
+            self.schema.clone(),
+        ))
+    }
+    /// On `StaleBuildLabel` (405): refresh `__Secure-1PSIDTS` via `identity`,
+    /// re-execute the wire request (one fresh bootstrap and one retry), and
+    /// preserve the retry's error taxonomy. 429/IpFlagged never enter this path.
     async fn execute_wire_with_recovery(
         &self,
         request: &LlmRequest,
@@ -247,14 +315,11 @@ impl DefaultGeminiAdapter {
         match self.execute_wire_request(request).await {
             Ok(body) => Ok(body),
             Err(GeminiAdapterError::StaleBuildLabel) => {
-                // Re-executing wire request performs one fresh bootstrap and one retry.
-                // If bootstrap or the retry request fails, map to a 502 bad gateway error.
-                match self.execute_wire_request(request).await {
-                    Ok(body) => Ok(body),
-                    Err(_) => Err(GeminiAdapterError::SchemaMismatch(
-                        "upstream 405 recovery failed on refresh or retry".to_owned(),
-                    )),
-                }
+                self.identity
+                    .refresh_1psidts()
+                    .await
+                    .map_err(map_identity_error)?;
+                self.execute_wire_request(request).await
             }
             other => other,
         }
@@ -297,17 +362,12 @@ impl GeminiAdapter for DefaultGeminiAdapter {
         &self,
         req: NormalizedLlmRequest,
     ) -> Result<ChunkStream, GeminiAdapterError> {
-        // Reuse the same upstream wire call; the full buffered body is parsed
-        // frame-by-frame through the prefix-diff engine.
-        let response_bytes = self.execute_wire_with_recovery(&req).await?;
-        // ChunkStream wraps a StreamChunk type distinct from LlmEvent.
-        // We delegate to the shared parse_stream_body and translate events.
-        use crate::stream::parse_stream_body;
         use futures::StreamExt;
         use gemini_bridge_llm_service::LlmEvent;
-        let llm_stream = parse_stream_body(&response_bytes, &self.schema)?;
-        let chunk_stream: ChunkStream = Box::pin(llm_stream.filter_map(|ev| async move {
-            match ev {
+
+        let llm_stream = self.stream_events(&req).await?;
+        let chunk_stream: ChunkStream = Box::pin(llm_stream.filter_map(|event| async move {
+            match event {
                 Ok(LlmEvent::TextDelta(text)) => Some(Ok(StreamChunk {
                     delta_text: Some(text),
                     is_finished: false,
@@ -317,7 +377,7 @@ impl GeminiAdapter for DefaultGeminiAdapter {
                 Ok(LlmEvent::Completed(summary)) => {
                     let metadata = summary
                         .metadata
-                        .and_then(|pm| serde_json::from_value::<GeminiWebMetadata>(pm.raw).ok());
+                        .and_then(|metadata| serde_json::from_value(metadata.raw).ok());
                     Some(Ok(StreamChunk {
                         delta_text: None,
                         is_finished: true,
@@ -326,7 +386,10 @@ impl GeminiAdapter for DefaultGeminiAdapter {
                     }))
                 }
                 Ok(_) => None,
-                Err(e) => Some(Err(GeminiAdapterError::Transport(e.to_string()))),
+                Err(error) => Some(Err(match error {
+                    LlmError::Protocol(message) => GeminiAdapterError::SchemaMismatch(message),
+                    other => GeminiAdapterError::Transport(other.to_string()),
+                })),
             }
         }));
         Ok(chunk_stream)
@@ -354,12 +417,7 @@ impl LlmAdapter for DefaultGeminiAdapter {
     }
 
     async fn stream(&self, request: Arc<LlmRequest>) -> Result<LlmEventStream, LlmError> {
-        use crate::stream::parse_stream_body;
-        let response_bytes = self
-            .execute_wire_with_recovery(&request)
-            .await
-            .map_err(map_llm_error)?;
-        parse_stream_body(&response_bytes, &self.schema).map_err(map_llm_error)
+        self.stream_events(&request).await.map_err(map_llm_error)
     }
 }
 

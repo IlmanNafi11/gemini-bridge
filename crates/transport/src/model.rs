@@ -1,7 +1,9 @@
+use std::{fmt, pin::Pin};
+
 use bytes::Bytes;
+use futures::Stream;
 use http::{HeaderMap, HeaderName};
 use reqwest::{Method, StatusCode};
-use std::fmt;
 use url::Url;
 
 /// Indicates whether a request may be retried on transient failure.
@@ -60,6 +62,29 @@ impl fmt::Debug for TransportRequest {
             .field("headers", &redacted)
             .field("body_len", &self.body.as_ref().map(|b| b.len()))
             .field("idempotency", &self.idempotency)
+            .finish()
+    }
+}
+
+/// A stream of response body chunks and transport failures.
+///
+/// The stream owns the upstream response; dropping it releases the connection.
+pub type TransportByteStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, crate::error::TransportError>> + Send>>;
+
+/// HTTP response metadata paired with a lazily-read body stream.
+pub struct TransportStreamResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: TransportByteStream,
+}
+
+impl fmt::Debug for TransportStreamResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransportStreamResponse")
+            .field("status", &self.status)
+            .field("headers", &"<redacted>")
+            .field("body", &"<stream>")
             .finish()
     }
 }

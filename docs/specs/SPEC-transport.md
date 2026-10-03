@@ -11,7 +11,7 @@
 
 ## 1. Objective & Responsibility
 
-The `transport` module provides all outbound HTTP network I/O for Gemini Web, content upload, and media retrieval. It encapsulates TLS fingerprint impersonation, proxy routing, timeout policies, and transport-level retry while preventing provider protocol details from leaking into the network layer.
+The `transport` module provides all outbound HTTP network I/O for Gemini Web, content upload, and media retrieval. It encapsulates browser-style HTTP header presets, proxy routing, timeout policies, and transport-level retry while preventing provider protocol details from leaking into the network layer. It uses the standard `reqwest`/`rustls` TLS stack and does not impersonate a browser ClientHello or JA3 fingerprint.
 
 ---
 
@@ -72,13 +72,13 @@ pub trait TransportService: Send + Sync {
 
 ## 3. Behavior & Invariants
 
-1. **TLS Profiles:** The selected profile must emit a coherent TLS ClientHello and HTTP header set; default profile is Chrome.
+1. **Transport Profiles:** The selected browser-named profile applies a coherent HTTP header preset; the default is Chrome. Profiles do not select cipher suites, extension ordering, JA3, or any other TLS ClientHello fingerprint.
 2. **Proxy Support:** HTTP and SOCKS5 proxy URLs are supported when configured; absent proxy connects directly.
 3. **Retry Separation:** Only transport errors explicitly marked transient may be retried. Provider HTTP status retries (`405`, `429`, etc.) remain outside this crate except when policy delegates idempotent status retry explicitly.
 4. **Idempotency:** Requests marked `NeverRetry` must never be repeated automatically.
 5. **Bounded Time:** Connect, request, and idle streaming timeouts are configured and finite.
 6. **No Secret Logging:** Cookie, Authorization, and upload token headers are redacted before traces are emitted.
-7. **Fase 0 Spike:** The actual Rust TLS implementation must be validated against Gemini Web before its crate/API is treated as final. Required acceptance is observable profile behavior, not a preselected dependency.
+7. **Live Compatibility Boundary:** Deterministic tests establish profile headers and transport behavior only. Current Gemini Web compatibility requires an opt-in credentialed `doctor` or live request and remains external evidence; it is not required to describe the implemented profile contract truthfully.
 
 ---
 
@@ -86,7 +86,7 @@ pub trait TransportService: Send + Sync {
 
 - Mock HTTP server tests for headers, body preservation, timeout, retry count, and non-idempotent no-retry.
 - Proxy integration test proving requests route through configured HTTP/SOCKS5 proxy.
-- TLS profile smoke against a fingerprint inspection endpoint and an opt-in Gemini Web `doctor` probe.
+- Header-profile tests assert exact preset headers and confirm that no unsupported TLS-fingerprint behavior is claimed; an opt-in Gemini Web `doctor` probe records separate live compatibility evidence.
 - Log capture test asserting that secret headers never appear.
 
 ---
@@ -94,5 +94,5 @@ pub trait TransportService: Send + Sync {
 ## 5. Boundaries
 
 - **Always:** Preserve request bytes exactly; bound retries and timeouts; redact sensitive headers.
-- **Ask First:** Selecting/replacing the TLS impersonation dependency, adding native system dependencies, or changing the default TLS profile.
-- **Never:** Retry `NeverRetry` requests, disable certificate verification, or embed provider-specific `f.req` logic.
+- **Ask First:** Adding native system dependencies or changing the default header profile.
+- **Never:** Claim JA3/ClientHello impersonation, retry `NeverRetry` requests, disable certificate verification, or embed provider-specific `f.req` logic.

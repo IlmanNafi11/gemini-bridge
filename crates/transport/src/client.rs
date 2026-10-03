@@ -1,17 +1,23 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use gemini_bridge_config::TransportConfig;
 use http::HeaderMap;
 use reqwest::Client;
 use reqwest::header::HeaderValue;
 
 use crate::error::TransportError;
-use crate::model::{Idempotency, TransportRequest, TransportResponse};
+use crate::model::{
+    Idempotency, TransportByteStream, TransportRequest, TransportResponse, TransportStreamResponse,
+};
 use crate::tls::TlsProfile;
 
 /// Maximum number of attempts (initial + retries) for `SafeToRetry` requests.
 const MAX_ATTEMPTS: u32 = 3;
+
+/// Maximum size of a response collected by `execute` (64 MiB).
+pub const MAX_BUFFERED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Concrete HTTP transport backed by `reqwest`.
 ///
@@ -26,10 +32,17 @@ impl ReqwestTransport {
     /// Build a new transport from configuration.
     ///
     /// Returns [`TransportError::ProxyFailure`] if the configured proxy URL is invalid,
+    /// [`TransportError::UnsupportedTlsProfile`] for an unknown profile, and
     /// [`TransportError::Network`] for any other client-build failure.
     pub fn new(config: &TransportConfig) -> Result<Self, TransportError> {
         let timeout = Duration::from_secs(config.timeout_secs);
-        let tls_profile = config.tls_profile.parse::<TlsProfile>().unwrap_or_default();
+        let profile_name = config.tls_profile.trim().to_ascii_lowercase();
+        if !matches!(profile_name.as_str(), "chrome" | "firefox" | "safari") {
+            return Err(TransportError::UnsupportedTlsProfile(
+                config.tls_profile.clone(),
+            ));
+        }
+        let tls_profile = profile_name.parse::<TlsProfile>().unwrap_or_default();
 
         let mut builder = Client::builder().timeout(timeout);
 
@@ -57,54 +70,90 @@ impl TransportService for ReqwestTransport {
         &self,
         request: TransportRequest,
     ) -> Result<TransportResponse, TransportError> {
+        let response = self.execute_response(request).await?;
+        let status = response.status();
+        let headers = convert_headers(response.headers());
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_BUFFERED_RESPONSE_BYTES as u64)
+        {
+            return Err(TransportError::ResponseTooLarge {
+                limit: MAX_BUFFERED_RESPONSE_BYTES,
+            });
+        }
+
+        let mut body = bytes::BytesMut::new();
+        let mut chunks = response.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|error| classify_error(error, self.timeout))?;
+            if chunk.len() > MAX_BUFFERED_RESPONSE_BYTES - body.len() {
+                return Err(TransportError::ResponseTooLarge {
+                    limit: MAX_BUFFERED_RESPONSE_BYTES,
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(TransportResponse {
+            status,
+            headers,
+            body: body.freeze(),
+        })
+    }
+
+    async fn execute_stream(
+        &self,
+        request: TransportRequest,
+    ) -> Result<TransportStreamResponse, TransportError> {
+        let response = self.execute_response(request).await?;
+        let status = response.status();
+        let headers = convert_headers(response.headers());
+        let timeout = self.timeout;
+        let body: TransportByteStream = Box::pin(
+            response
+                .bytes_stream()
+                .map(move |chunk| chunk.map_err(|error| classify_error(error, timeout))),
+        );
+        Ok(TransportStreamResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+impl ReqwestTransport {
+    async fn execute_response(
+        &self,
+        request: TransportRequest,
+    ) -> Result<reqwest::Response, TransportError> {
         let max_attempts = match request.idempotency {
             Idempotency::SafeToRetry => MAX_ATTEMPTS,
             Idempotency::NeverRetry => 1,
         };
-
         let mut last_err = None;
 
         for attempt in 0..max_attempts {
-            // Build a fresh reqwest::Request on each attempt (body bytes are cheap Bytes clone).
             let req = build_reqwest_request(&self.client, &request, &self.tls_profile)?;
-
             match self.client.execute(req).await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    // Convert http::StatusCode (same type as reqwest::StatusCode) directly.
-                    let headers = convert_headers(resp.headers());
-                    let body = resp
-                        .bytes()
-                        .await
-                        .map_err(|e| classify_error(e, self.timeout))?;
-                    return Ok(TransportResponse {
-                        status,
-                        headers,
-                        body,
-                    });
-                }
-                Err(e) => {
-                    let classified = classify_error(e, self.timeout);
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let classified = classify_error(error, self.timeout);
                     let is_transient = matches!(
                         &classified,
                         TransportError::Timeout(_) | TransportError::Network(_)
                     );
-                    // Only retry if this request is safe to retry AND the error is transient
-                    // AND we have attempts remaining.
                     if request.idempotency == Idempotency::SafeToRetry
                         && is_transient
                         && attempt + 1 < max_attempts
                     {
                         last_err = Some(classified);
-                        continue;
+                    } else {
+                        return Err(classified);
                     }
-                    return Err(classified);
                 }
             }
         }
-
-        // Exhausted all retry attempts; return the last error.
-        Err(last_err.unwrap_or_else(|| TransportError::Network("no attempts made".to_string())))
+        Err(last_err.unwrap_or_else(|| TransportError::Network("no attempts made".to_owned())))
     }
 }
 
@@ -115,11 +164,17 @@ impl TransportService for ReqwestTransport {
 pub trait TransportService: Send + Sync {
     async fn execute(&self, request: TransportRequest)
     -> Result<TransportResponse, TransportError>;
-}
 
+    /// Execute a request and return the response with its body still open as an
+    /// incremental byte stream. Dropping the body stream cancels the upstream read.
+    async fn execute_stream(
+        &self,
+        request: TransportRequest,
+    ) -> Result<TransportStreamResponse, TransportError>;
+}
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Build a `reqwest::Request` from a `TransportRequest`, injecting TLS profile headers.
+/// Build a `reqwest::Request` from a `TransportRequest`, applying HTTP header presets.
 fn build_reqwest_request(
     client: &Client,
     req: &TransportRequest,

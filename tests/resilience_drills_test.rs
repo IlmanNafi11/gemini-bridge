@@ -3,6 +3,7 @@
 //! These tests exercise the boundary behaviour specified in SPEC-identity.md §3.4–3.5
 //! and SPEC-health-admin.md §3.3 through a real Axum server + wiremock upstream.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -28,6 +29,10 @@ fn bridge_config(tmp: &std::path::Path) -> BridgeConfig {
             port: 0,
             api_key: None,
             cors_enabled: false,
+            cors_origins: Vec::new(),
+            concurrency_limit: 4,
+            body_limit_bytes: 10 * 1024 * 1024,
+            rate_limit: None,
             metrics_enabled: false,
         },
         storage: StorageConfig {
@@ -91,6 +96,7 @@ async fn build_test_app(
         image_service: None,
         video_service: None,
         health_admin,
+        identity_service: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
@@ -137,17 +143,33 @@ async fn drill_405_recovery_succeeds_on_retry() {
 
     // /app — always succeeds (both initial bootstrap and the refresh)
     Mock::given(method("GET"))
-        .and(path("/app"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(APP_HTML))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(APP_HTML)
+                .insert_header(
+                    "set-cookie",
+                    "__Secure-1PSIDTS=rotated-value; Path=/; Secure",
+                ),
+        )
         .mount(&upstream)
         .await;
 
+    let observed_cookies = Arc::new(Mutex::new(Vec::new()));
+    let observed_cookies_for_response = observed_cookies.clone();
     // StreamGenerate — 405 first, then 200
     let call_count = Arc::new(AtomicU32::new(0));
     let call_count2 = call_count.clone();
     Mock::given(method("POST"))
         .and(path_regex(r"/.*StreamGenerate.*"))
-        .respond_with(move |_: &wiremock::Request| {
+        .respond_with(move |request: &wiremock::Request| {
+            observed_cookies_for_response.lock().push(
+                request
+                    .headers
+                    .get("cookie")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
             let n = call_count2.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
                 ResponseTemplate::new(405)
@@ -180,6 +202,19 @@ async fn drill_405_recovery_succeeds_on_retry() {
         2,
         "StreamGenerate must be called exactly twice on 405 recovery"
     );
+    let cookies = observed_cookies.lock();
+    assert_eq!(cookies.len(), 2);
+    assert!(cookies[0].contains("__Secure-1PSIDTS=fake-ts"));
+    assert!(cookies[1].contains("__Secure-1PSIDTS=rotated-value"));
+    let restarted = DefaultIdentityService::with_base_url(&bridge_config(tmp.path()), None)
+        .expect("rotated credentials must reload from durable storage");
+    let mut headers = reqwest::header::HeaderMap::new();
+    restarted.apply_auth_headers(&mut headers).unwrap();
+    let persisted_cookie = headers
+        .get(reqwest::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .expect("reloaded service must provide its persisted cookie");
+    assert!(persisted_cookie.contains("__Secure-1PSIDTS=rotated-value"));
 }
 
 /// E2-2: If the second attempt also returns 405, the client receives HTTP 502
@@ -191,7 +226,14 @@ async fn drill_405_double_failure_returns_502() {
 
     Mock::given(method("GET"))
         .and(path("/app"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(APP_HTML))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(APP_HTML)
+                .insert_header(
+                    "set-cookie",
+                    "__Secure-1PSIDTS=rotated-value; Path=/; Secure",
+                ),
+        )
         .mount(&upstream)
         .await;
 
@@ -217,8 +259,8 @@ async fn drill_405_double_failure_returns_502() {
 
     assert_eq!(
         resp.status().as_u16(),
-        502,
-        "double-405 should surface as 502 to client"
+        503,
+        "a repeated 405 preserves the unavailable-provider taxonomy"
     );
 
     // Must NOT have retried more than twice total
@@ -228,7 +270,7 @@ async fn drill_405_double_failure_returns_502() {
     );
 }
 
-/// A 405 followed by a failed bootstrap refresh is reported as 502 and is not retried.
+/// A 405 followed by a failed cookie rotation preserves the auth error and is not retried.
 #[tokio::test]
 async fn drill_405_refresh_failure_returns_502_without_retry() {
     let upstream = MockServer::start().await;
@@ -267,7 +309,7 @@ async fn drill_405_refresh_failure_returns_502_without_retry() {
         .await
         .unwrap();
 
-    assert_eq!(response.status().as_u16(), 502);
+    assert_eq!(response.status().as_u16(), 401);
     assert_eq!(app_calls.load(Ordering::SeqCst), 2);
     assert_eq!(post_calls.load(Ordering::SeqCst), 1);
 }
@@ -362,6 +404,7 @@ async fn drill_cookie_expiry_surfaces_needs_reauth() {
         image_service: None,
         video_service: None,
         health_admin,
+        identity_service: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,

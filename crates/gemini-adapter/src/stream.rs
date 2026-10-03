@@ -1,70 +1,58 @@
-//! Streaming response parser for Gemini Web's newline-framed protocol.
+//! Incremental parser for Gemini Web's newline-framed streaming protocol.
 //!
-//! Gemini `StreamGenerate` returns the same newline-framed, anti-XSSI format
-//! as the non-streaming path, but may contain multiple JSON frames in one
-//! body, each holding a cumulative text snapshot. This module parses the
-//! full body and emits [`LlmEvent`]s by driving [`PrefixDiff`] over
-//! successive frames.
-//!
-//! The result is an in-memory stream — no incremental network I/O is needed
-//! because `TransportResponse.body` already contains the complete buffered
-//! bytes.
+//! The parser consumes transport chunks as they arrive, buffers only the current
+//! incomplete frame, and converts cumulative text snapshots into deltas.
 
-use futures::stream;
+use std::collections::VecDeque;
+
+use futures::{StreamExt, stream};
 use gemini_bridge_llm_service::{
     CompletionSummary, LlmError, LlmEvent, LlmEventStream, ProviderMetadata,
 };
+use gemini_bridge_transport::{TransportByteStream, TransportError};
 use serde_json::Value;
 
 use crate::prefix_diff::{Delta, PrefixDiff};
 use crate::schema::GeminiWebSchema;
-use crate::{GeminiAdapterError, find_candidate_text, parse_non_stream_metadata};
+use crate::{
+    GeminiAdapterError, GeminiWebMetadata, find_candidate_text, parse_non_stream_metadata,
+};
 
-/// Parse a complete Gemini `StreamGenerate` body into an ordered sequence of
-/// [`LlmEvent`]s and box it as an [`LlmEventStream`].
+/// Maximum bytes retained for one newline-delimited upstream frame.
+pub const MAX_STREAM_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Parse a complete response body and return its events immediately.
 ///
-/// * Iterates over newline-framed JSON, extracting cumulative text per frame.
-/// * Runs all snapshots through [`PrefixDiff`] to produce minimal deltas.
-/// * Appends a terminal [`LlmEvent::Completed`] with finish reason `"stop"`.
-/// * Malformed frames are skipped; if no frame matched, returns
-///   `GeminiAdapterError::SchemaMismatch`.
+/// This retains the original buffered parser contract. Production streaming
+/// uses [`parse_stream`] so it does not wait for response completion.
 pub fn parse_stream_body(
     body: &[u8],
     schema: &GeminiWebSchema,
 ) -> Result<LlmEventStream, GeminiAdapterError> {
-    let response = std::str::from_utf8(body).map_err(|e| {
-        GeminiAdapterError::SchemaMismatch(format!("stream body is not UTF-8: {e}"))
+    let response = std::str::from_utf8(body).map_err(|error| {
+        GeminiAdapterError::SchemaMismatch(format!("stream body is not UTF-8: {error}"))
     })?;
-
-    let metadata = parse_non_stream_metadata(body).map(|meta| ProviderMetadata {
-        raw: serde_json::json!({
-            "conversation_id": meta.conversation_id,
-            "response_id": meta.response_id,
-            "candidate_id": meta.candidate_id,
-            "code_execution": meta.code_execution,
-            "citations": meta.citations,
-        }),
+    let metadata = parse_non_stream_metadata(body).map(|metadata| ProviderMetadata {
+        raw: metadata_to_json(&metadata),
     });
     let mut diff = PrefixDiff::new();
     let mut events: Vec<Result<LlmEvent, LlmError>> = Vec::new();
     let mut parsed_frame = false;
 
     for line in response.lines().map(str::trim) {
-        if line.is_empty() || line == ")]}'" || line.bytes().all(|b| b.is_ascii_digit()) {
+        if line.is_empty() || line == ")]}'" || line.bytes().all(|byte| byte.is_ascii_digit()) {
             continue;
         }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let mut latest: Option<String> = None;
+        let mut latest = None;
         find_candidate_text(&value, schema, &mut latest);
-
         if let Some(snapshot) = latest {
             parsed_frame = true;
             if let Some(delta) = diff.update(&snapshot) {
                 let text = match delta {
-                    Delta::Suffix(s) => s,
-                    Delta::Reset(s) => s,
+                    Delta::Suffix(text) | Delta::Reset(text) => text,
                 };
                 events.push(Ok(LlmEvent::TextDelta(text)));
             }
@@ -76,90 +64,303 @@ pub fn parse_stream_body(
             "stream body contained no parseable candidate frames".to_owned(),
         ));
     }
-
     events.push(Ok(LlmEvent::Completed(CompletionSummary {
         finish_reason: "stop".to_owned(),
         usage: None,
         metadata,
     })));
-
     Ok(Box::pin(stream::iter(events)))
+}
+
+fn metadata_to_json(metadata: &GeminiWebMetadata) -> Value {
+    serde_json::json!({
+        "conversation_id": metadata.conversation_id,
+        "response_id": metadata.response_id,
+        "candidate_id": metadata.candidate_id,
+        "code_execution": metadata.code_execution,
+        "citations": metadata.citations,
+    })
+}
+
+/// Parse response chunks incrementally into provider-neutral LLM events.
+///
+/// Dropping the returned stream drops `input`, which in production owns the
+/// reqwest response body and therefore cancels/releases the upstream read.
+pub fn parse_stream(input: TransportByteStream, schema: GeminiWebSchema) -> LlmEventStream {
+    let state = ParserState {
+        input,
+        schema,
+        frame: Vec::new(),
+        diff: PrefixDiff::new(),
+        metadata: GeminiWebMetadata::default(),
+        parsed_frame: false,
+        pending: VecDeque::new(),
+        finished: false,
+    };
+
+    Box::pin(stream::unfold(state, |mut state| async move {
+        let event = state.next_event().await?;
+        Some((event, state))
+    }))
+}
+
+struct ParserState {
+    input: TransportByteStream,
+    schema: GeminiWebSchema,
+    frame: Vec<u8>,
+    diff: PrefixDiff,
+    metadata: GeminiWebMetadata,
+    parsed_frame: bool,
+    pending: VecDeque<Result<LlmEvent, LlmError>>,
+    finished: bool,
+}
+
+impl ParserState {
+    async fn next_event(&mut self) -> Option<Result<LlmEvent, LlmError>> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Some(event);
+            }
+            if self.finished {
+                return None;
+            }
+
+            match self.input.next().await {
+                Some(Ok(chunk)) => {
+                    if let Err(error) = self.consume_chunk(&chunk) {
+                        self.fail(error);
+                    }
+                }
+                Some(Err(error)) => self.fail(map_transport_error(error)),
+                None => self.finish(),
+            }
+        }
+    }
+
+    fn consume_chunk(&mut self, chunk: &[u8]) -> Result<(), LlmError> {
+        let mut remaining = chunk;
+        while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
+            let (part, tail) = remaining.split_at(newline + 1);
+            self.push_frame_bytes(part)?;
+            let frame = std::mem::take(&mut self.frame);
+            self.parse_frame(&frame)?;
+            remaining = tail;
+        }
+        self.push_frame_bytes(remaining)
+    }
+
+    fn push_frame_bytes(&mut self, bytes: &[u8]) -> Result<(), LlmError> {
+        if self.frame.len().saturating_add(bytes.len()) > MAX_STREAM_FRAME_BYTES {
+            return Err(protocol_error(format!(
+                "upstream frame exceeds {MAX_STREAM_FRAME_BYTES} byte limit"
+            )));
+        }
+        self.frame.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn parse_frame(&mut self, frame: &[u8]) -> Result<(), LlmError> {
+        let line = std::str::from_utf8(frame)
+            .map_err(|error| protocol_error(format!("stream frame is not UTF-8: {error}")))?
+            .trim();
+        if line.is_empty() || line == ")]}'" || line.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Ok(());
+        }
+
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| protocol_error(format!("invalid stream JSON frame: {error}")))?;
+        if let Some(metadata) = parse_non_stream_metadata(line.as_bytes()) {
+            merge_metadata(&mut self.metadata, metadata);
+        }
+
+        let mut latest = None;
+        find_candidate_text(&value, &self.schema, &mut latest);
+        if let Some(snapshot) = latest {
+            self.parsed_frame = true;
+            if let Some(delta) = self.diff.update(&snapshot) {
+                let text = match delta {
+                    Delta::Suffix(text) | Delta::Reset(text) => text,
+                };
+                self.pending.push_back(Ok(LlmEvent::TextDelta(text)));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) {
+        if !self.frame.is_empty() {
+            let frame = std::mem::take(&mut self.frame);
+            if let Err(error) = self.parse_frame(&frame) {
+                self.fail(error);
+                return;
+            }
+        }
+
+        self.finished = true;
+        if !self.parsed_frame {
+            self.pending.push_back(Err(protocol_error(
+                "stream body contained no parseable candidate frames",
+            )));
+            return;
+        }
+
+        let metadata = metadata_provider(&self.metadata);
+        self.pending
+            .push_back(Ok(LlmEvent::Completed(CompletionSummary {
+                finish_reason: "stop".to_owned(),
+                usage: None,
+                metadata,
+            })));
+    }
+
+    fn fail(&mut self, error: LlmError) {
+        self.finished = true;
+        self.frame.clear();
+        self.pending.clear();
+        self.pending.push_back(Err(error));
+    }
+}
+
+fn protocol_error(message: impl Into<String>) -> LlmError {
+    LlmError::Protocol(message.into())
+}
+
+fn map_transport_error(_error: TransportError) -> LlmError {
+    LlmError::Unavailable
+}
+
+fn merge_metadata(target: &mut GeminiWebMetadata, incoming: GeminiWebMetadata) {
+    if incoming.conversation_id.is_some() {
+        target.conversation_id = incoming.conversation_id;
+    }
+    if incoming.response_id.is_some() {
+        target.response_id = incoming.response_id;
+    }
+    if incoming.candidate_id.is_some() {
+        target.candidate_id = incoming.candidate_id;
+    }
+    for block in incoming.code_execution {
+        if !target.code_execution.contains(&block) {
+            target.code_execution.push(block);
+        }
+    }
+    for citation in incoming.citations {
+        if !target.citations.contains(&citation) {
+            target.citations.push(citation);
+        }
+    }
+}
+
+fn metadata_provider(metadata: &GeminiWebMetadata) -> Option<ProviderMetadata> {
+    if metadata == &GeminiWebMetadata::default() {
+        return None;
+    }
+    Some(ProviderMetadata {
+        raw: serde_json::json!({
+            "conversation_id": metadata.conversation_id,
+            "response_id": metadata.response_id,
+            "candidate_id": metadata.candidate_id,
+            "code_execution": metadata.code_execution,
+            "citations": metadata.citations,
+        }),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
+    use bytes::Bytes;
+    use futures::{StreamExt, stream};
     use gemini_bridge_llm_service::LlmEvent;
     use serde_json::json;
-
-    use crate::schema::GeminiWebSchema;
 
     use super::*;
 
     fn frame(text: &str) -> String {
-        let inner = json!({
-            "candidates": [{"parts": [{"text": text}]}]
-        });
-        format!(")]}}'\n{inner}\n")
+        format!(
+            ")]}}'\n{}\n",
+            json!({"candidates": [{"parts": [{"text": text}]}]})
+        )
     }
 
-    fn multi_frame(texts: &[&str]) -> String {
-        texts.iter().map(|t| frame(t)).collect::<Vec<_>>().join("")
-    }
-
-    #[tokio::test]
-    async fn single_frame_emits_text_delta_then_completed() {
-        let body = frame("Hello!");
-        let stream = parse_stream_body(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
-        let events: Vec<_> = stream.collect().await;
-
-        assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(t)) if t == "Hello!"));
-        assert!(matches!(&events[1], Ok(LlmEvent::Completed(s)) if s.finish_reason == "stop"));
+    fn byte_stream(chunks: Vec<Result<Bytes, TransportError>>) -> TransportByteStream {
+        Box::pin(stream::iter(chunks))
     }
 
     #[tokio::test]
-    async fn multiple_cumulative_frames_produce_suffix_deltas() {
-        let body = multi_frame(&["Hello", "Hello world", "Hello world!"]);
-        let stream = parse_stream_body(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
-        let events: Vec<_> = stream.collect().await;
+    async fn partial_frames_across_transport_chunks_parse_incrementally() {
+        let response = format!("{}{}", frame("Hello"), frame("Hello world"));
+        let split_a = 7;
+        let split_b = response.len() - 5;
+        let input = byte_stream(vec![
+            Ok(Bytes::copy_from_slice(&response.as_bytes()[..split_a])),
+            Ok(Bytes::copy_from_slice(
+                &response.as_bytes()[split_a..split_b],
+            )),
+            Ok(Bytes::copy_from_slice(&response.as_bytes()[split_b..])),
+        ]);
 
-        // 3 deltas + 1 Completed
-        assert_eq!(events.len(), 4);
-        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(t)) if t == "Hello"));
-        assert!(matches!(&events[1], Ok(LlmEvent::TextDelta(t)) if t == " world"));
-        assert!(matches!(&events[2], Ok(LlmEvent::TextDelta(t)) if t == "!"));
-        assert!(matches!(&events[3], Ok(LlmEvent::Completed(_))));
-    }
-
-    #[tokio::test]
-    async fn non_prefix_snapshot_emits_reset_text() {
-        let body = multi_frame(&["Thinking...", "Final answer"]);
-        let stream = parse_stream_body(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
-        let events: Vec<_> = stream.collect().await;
-
-        // 2 deltas + 1 Completed
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(t)) if t == "Thinking..."));
-        assert!(matches!(&events[1], Ok(LlmEvent::TextDelta(t)) if t == "Final answer"));
+        let events: Vec<_> = parse_stream(input, GeminiWebSchema::default())
+            .collect()
+            .await;
+        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(text)) if text == "Hello"));
+        assert!(matches!(&events[1], Ok(LlmEvent::TextDelta(text)) if text == " world"));
         assert!(matches!(&events[2], Ok(LlmEvent::Completed(_))));
     }
 
     #[tokio::test]
-    async fn malformed_body_returns_schema_mismatch() {
-        let result = parse_stream_body(b"not json at all", &GeminiWebSchema::default());
-        assert!(matches!(result, Err(GeminiAdapterError::SchemaMismatch(_))));
+    async fn malformed_mid_stream_frame_maps_to_protocol_error_without_completion() {
+        let input = byte_stream(vec![
+            Ok(Bytes::from(frame("Hello"))),
+            Ok(Bytes::from_static(b"{not-json}\n")),
+        ]);
+
+        let events: Vec<_> = parse_stream(input, GeminiWebSchema::default())
+            .collect()
+            .await;
+        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(text)) if text == "Hello"));
+        assert!(matches!(&events[1], Err(LlmError::Protocol(_))));
+        assert_eq!(events.len(), 2);
     }
 
     #[tokio::test]
-    async fn duplicate_frame_is_deduplicated_by_prefix_diff() {
-        let body = multi_frame(&["Hello", "Hello"]);
-        let stream = parse_stream_body(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
-        let events: Vec<_> = stream.collect().await;
+    async fn mid_stream_transport_failure_maps_to_unavailable_without_completion() {
+        let input = byte_stream(vec![
+            Ok(Bytes::from(frame("Hello"))),
+            Err(TransportError::Network("connection reset".to_owned())),
+        ]);
 
-        // Only one TextDelta (the duplicate is a no-op) + Completed
+        let events: Vec<_> = parse_stream(input, GeminiWebSchema::default())
+            .collect()
+            .await;
+        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(text)) if text == "Hello"));
+        assert!(matches!(&events[1], Err(LlmError::Unavailable)));
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(t)) if t == "Hello"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_frame_buffer_is_bounded() {
+        let input = byte_stream(vec![Ok(Bytes::from(vec![
+            b'x';
+            MAX_STREAM_FRAME_BYTES + 1
+        ]))]);
+
+        let events: Vec<_> = parse_stream(input, GeminiWebSchema::default())
+            .collect()
+            .await;
+        assert!(
+            matches!(&events[0], Err(LlmError::Protocol(message)) if message.contains("exceeds"))
+        );
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn buffered_compatibility_parser_emits_delta_then_completed() {
+        let body = frame("Hello!");
+        let events: Vec<_> = parse_stream_body(body.as_bytes(), &GeminiWebSchema::default())
+            .unwrap()
+            .collect()
+            .await;
+        assert!(matches!(&events[0], Ok(LlmEvent::TextDelta(text)) if text == "Hello!"));
         assert!(matches!(&events[1], Ok(LlmEvent::Completed(_))));
     }
 }

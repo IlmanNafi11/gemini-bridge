@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
 use gemini_bridge_adapter_gemini::schema::{GeminiWebSchema, PathSegment};
@@ -9,7 +10,7 @@ use gemini_bridge_adapter_gemini::{
 use gemini_bridge_config::{BridgeConfig, ServerConfig, StorageConfig, TransportConfig};
 use gemini_bridge_identity::{DefaultIdentityService, IdentityService};
 use gemini_bridge_llm_service::{
-    ContentPart, LlmAdapter, LlmRequest, Message, ModelSelector, Role,
+    ContentPart, LlmAdapter, LlmError, LlmRequest, Message, ModelSelector, Role,
 };
 use insta::assert_snapshot;
 use tempfile::tempdir;
@@ -26,6 +27,7 @@ fn make_config(temp_dir: &std::path::Path) -> Arc<BridgeConfig> {
             api_key: None,
             cors_enabled: false,
             metrics_enabled: false,
+            ..ServerConfig::default()
         },
         storage: StorageConfig {
             data_dir: temp_dir.to_path_buf(),
@@ -161,17 +163,180 @@ async fn llm_adapter_trait_implementation_streams_parsed_events() {
             if summary.finish_reason == "stop"
     ));
 }
+#[tokio::test]
+async fn stream_yields_complete_frames_before_upstream_finishes_and_drop_cancels_read() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::time::{Duration, timeout};
+
+    let identity_server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&identity_server).await;
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .mount(&identity_server)
+        .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+    let (closed_tx, closed_rx) = oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut bytes = [0_u8; 1024];
+            let count = socket.read(&mut bytes).await.unwrap();
+            if count == 0 {
+                return;
+            }
+            request.extend_from_slice(&bytes[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let frame = format!(
+            ")]}}'\n{}\n",
+            serde_json::json!({"candidates": [{"parts": [{"text": "First frame"}]}]})
+        );
+        let split = frame.len() / 2;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        for part in [&frame.as_bytes()[..split], &frame.as_bytes()[split..]] {
+            socket
+                .write_all(format!("{:X}\r\n", part.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(part).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+        }
+
+        // Wait for the client to drop the stream (connection close) before
+        // signaling completion.
+        let mut byte = [0_u8; 1024];
+        loop {
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        let _ = closed_tx.send(());
+    });
+
+    let config = make_config(_dir.path());
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, upstream_url).unwrap();
+    let mut events = adapter.stream(test_request()).await.unwrap();
+    let first = timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("first frame must arrive while upstream remains open")
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(first, gemini_bridge_llm_service::LlmEvent::TextDelta(text) if text == "First frame")
+    );
+
+    drop(events);
+    timeout(Duration::from_secs(2), closed_rx)
+        .await
+        .expect("dropping downstream stream must close the upstream response")
+        .expect("upstream close notification");
+    upstream.await.unwrap();
+}
 
 #[tokio::test]
-async fn repeated_405_is_bounded_and_maps_to_protocol_error() {
+async fn mid_stream_upstream_close_surfaces_error_event_not_hang() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{Duration, timeout};
+
+    let identity_server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&identity_server).await;
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .mount(&identity_server)
+        .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut bytes = [0_u8; 1024];
+            let count = socket.read(&mut bytes).await.unwrap();
+            if count == 0 {
+                return;
+            }
+            request.extend_from_slice(&bytes[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let frame = format!(
+            ")]}}'\n{}\n",
+            serde_json::json!({"candidates": [{"parts": [{"text": "Partial"}]}]})
+        );
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket
+            .write_all(format!("{:X}\r\n", frame.len()).as_bytes())
+            .await
+            .unwrap();
+        socket.write_all(frame.as_bytes()).await.unwrap();
+        socket.write_all(b"\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+        // Abruptly abort the connection mid-stream, without the terminal 0-length
+        // chunk: the downstream stream must surface a transport error event.
+    });
+
+    let config = make_config(_dir.path());
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, upstream_url).unwrap();
+    let mut events = adapter.stream(test_request()).await.unwrap();
+    let first = timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("first frame must arrive before the close")
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(first, gemini_bridge_llm_service::LlmEvent::TextDelta(text) if text == "Partial")
+    );
+
+    let second = timeout(Duration::from_secs(2), events.next())
+        .await
+        .expect("abrupt upstream close must surface an error event, not hang");
+    assert!(matches!(
+        second,
+        Some(Err(gemini_bridge_llm_service::LlmError::Unavailable))
+    ));
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_405_is_bounded_and_preserves_stale_build_label() {
     let server = MockServer::start().await;
     let (identity, _dir) = make_identity(&server).await;
     let config = make_config(_dir.path());
 
     Mock::given(method("GET"))
         .and(path("/app"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
-        .expect(2)
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "__Secure-1PSIDTS=fresh-ts; Path=/; Secure")
+                .set_body_string(bootstrap_body()),
+        )
+        .expect(3)
         .mount(&server)
         .await;
 
@@ -185,13 +350,90 @@ async fn repeated_405_is_bounded_and_maps_to_protocol_error() {
         .await;
 
     let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
-    let err = adapter
-        .generate_non_stream(test_request())
-        .await
-        .err()
-        .unwrap();
+    let err = adapter.complete(test_request()).await.err().unwrap();
 
-    assert!(matches!(err, GeminiAdapterError::SchemaMismatch(_)));
+    assert!(matches!(err, LlmError::Unavailable));
+}
+
+#[tokio::test]
+async fn second_attempt_429_preserves_rate_limit_taxonomy() {
+    let server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&server).await;
+    let config = make_config(_dir.path());
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "__Secure-1PSIDTS=fresh-ts; Path=/; Secure")
+                .set_body_string(bootstrap_body()),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let post_calls = Arc::new(AtomicUsize::new(0));
+    let post_calls_for_response = post_calls.clone();
+    Mock::given(method("POST"))
+        .and(path(
+            "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        ))
+        .respond_with(move |_request: &wiremock::Request| {
+            if post_calls_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(405)
+            } else {
+                ResponseTemplate::new(429)
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
+    let err = adapter.complete(test_request()).await.err().unwrap();
+
+    assert!(matches!(err, LlmError::RateLimited));
+}
+
+#[tokio::test]
+async fn stream_retry_preserves_second_attempt_rate_limit_taxonomy() {
+    let server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&server).await;
+    let config = make_config(_dir.path());
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("set-cookie", "__Secure-1PSIDTS=fresh-ts; Path=/; Secure")
+                .set_body_string(bootstrap_body()),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let post_calls = Arc::new(AtomicUsize::new(0));
+    let post_calls_for_response = post_calls.clone();
+    Mock::given(method("POST"))
+        .and(path(
+            "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        ))
+        .respond_with(move |_request: &wiremock::Request| {
+            if post_calls_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(405)
+            } else {
+                ResponseTemplate::new(429)
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
+    let err = adapter.stream(test_request()).await.err().unwrap();
+
+    assert!(matches!(err, LlmError::RateLimited));
+    assert_eq!(post_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -215,13 +457,9 @@ async fn status_429_maps_to_rate_limited() {
         .await;
 
     let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
-    let err = adapter
-        .generate_non_stream(test_request())
-        .await
-        .err()
-        .unwrap();
+    let err = adapter.complete(test_request()).await.err().unwrap();
 
-    assert!(matches!(err, GeminiAdapterError::RateLimited));
+    assert!(matches!(err, LlmError::RateLimited));
 }
 
 #[tokio::test]
@@ -245,13 +483,9 @@ async fn status_401_maps_to_needs_auth() {
         .await;
 
     let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
-    let err = adapter
-        .generate_non_stream(test_request())
-        .await
-        .err()
-        .unwrap();
+    let err = adapter.complete(test_request()).await.err().unwrap();
 
-    assert!(matches!(err, GeminiAdapterError::NeedsAuth));
+    assert!(matches!(err, LlmError::Authentication));
 }
 
 #[test]

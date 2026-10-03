@@ -25,6 +25,50 @@ fn request(url: Url, idempotency: Idempotency) -> TransportRequest {
         idempotency,
     }
 }
+#[test]
+fn transport_rejects_unknown_tls_profile_instead_of_falling_back_to_chrome() {
+    let mut config = config(5);
+    config.tls_profile = "ja3".to_owned();
+
+    assert!(matches!(
+        ReqwestTransport::new(&config),
+        Err(TransportError::UnsupportedTlsProfile(profile)) if profile == "ja3"
+    ));
+}
+
+#[test]
+fn transport_accepts_configured_chrome_default_profile() {
+    assert!(ReqwestTransport::new(&config(5)).is_ok());
+}
+
+#[tokio::test]
+async fn execute_stream_exposes_response_body_as_incremental_chunks() {
+    use futures::StreamExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/stream"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"first\nsecond\n".to_vec()))
+        .mount(&server)
+        .await;
+
+    let transport = ReqwestTransport::new(&config(5)).unwrap();
+    let response = transport
+        .execute_stream(request(
+            Url::parse(&format!("{}/stream", server.uri())).unwrap(),
+            Idempotency::NeverRetry,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, StatusCode::OK);
+    let mut chunks = response.body;
+    let mut body = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        body.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(body, b"first\nsecond\n");
+}
 
 #[tokio::test]
 async fn request_execution_returns_body_status_and_headers() {
@@ -52,6 +96,45 @@ async fn request_execution_returns_body_status_and_headers() {
     assert_eq!(response.status, StatusCode::CREATED);
     assert_eq!(response.headers["x-result"], "created");
     assert_eq!(response.body.as_ref(), b"response-body");
+}
+#[tokio::test]
+async fn execute_rejects_oversized_buffered_response_and_accepts_limit() {
+    let server = MockServer::start().await;
+    let limit = gemini_bridge_transport::MAX_BUFFERED_RESPONSE_BYTES;
+    Mock::given(method("POST"))
+        .and(path("/oversized"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!("{}{}", "x".repeat(limit), "x"),
+            "application/octet-stream",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/boundary"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; limit]))
+        .mount(&server)
+        .await;
+
+    let transport = ReqwestTransport::new(&config(10)).unwrap();
+    let oversized = transport
+        .execute(request(
+            Url::parse(&format!("{}/oversized", server.uri())).unwrap(),
+            Idempotency::NeverRetry,
+        ))
+        .await;
+    assert!(matches!(
+        oversized,
+        Err(TransportError::ResponseTooLarge { limit: actual }) if actual == limit
+    ));
+
+    let boundary = transport
+        .execute(request(
+            Url::parse(&format!("{}/boundary", server.uri())).unwrap(),
+            Idempotency::NeverRetry,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(boundary.body.len(), limit);
 }
 
 #[tokio::test]
@@ -160,6 +243,20 @@ fn secret_headers_are_masked_in_debug_output() {
     };
     let debug = format!("{response:?}");
     assert!(!debug.contains("response-secret"));
+}
+
+#[test]
+fn tls_profiles_do_not_claim_client_hello_impersonation() {
+    // Task 0.3 remediation: the stack is reqwest + rustls, which supports HTTP
+    // header presets only. The public API must not present header presets as
+    // JA3/TLS fingerprint impersonation.
+    for profile in [
+        gemini_bridge_transport::TlsProfile::Chrome,
+        gemini_bridge_transport::TlsProfile::Firefox,
+        gemini_bridge_transport::TlsProfile::Safari,
+    ] {
+        assert!(!profile.has_client_hello_impersonation());
+    }
 }
 
 #[test]
