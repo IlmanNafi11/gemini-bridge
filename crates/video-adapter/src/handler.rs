@@ -5,9 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::Bytes;
-use reqwest::Client;
 
 use gemini_bridge_media_store::{MediaMetadata, MediaStore, cleanup};
+use gemini_bridge_upload::{HardenedMediaDownloader, MediaDownloader, MediaKind};
 
 use crate::{
     VideoAdapter, VideoConfig, VideoError, VideoGenerationRequest, VideoGenerationResponse,
@@ -19,6 +19,7 @@ pub struct DefaultVideoService<S, A> {
     config: VideoConfig,
     adapter: Arc<A>,
     store: S,
+    downloader: Arc<dyn MediaDownloader>,
 }
 
 impl<S, A> DefaultVideoService<S, A>
@@ -27,10 +28,21 @@ where
     A: VideoAdapter + 'static,
 {
     pub fn new(config: VideoConfig, adapter: Arc<A>, store: S) -> Self {
+        Self::with_downloader(config, adapter, store, Arc::new(HardenedMediaDownloader))
+    }
+
+    /// Construct with an injectable media downloader for deterministic tests.
+    pub fn with_downloader(
+        config: VideoConfig,
+        adapter: Arc<A>,
+        store: S,
+        downloader: Arc<dyn MediaDownloader>,
+    ) -> Self {
         Self {
             config,
             adapter,
             store,
+            downloader,
         }
     }
 
@@ -62,35 +74,22 @@ where
         Ok(())
     }
 
-    async fn download_video_bytes(url: &str) -> Result<(Bytes, String), VideoError> {
-        let client = Client::builder()
-            .build()
-            .map_err(|e| VideoError::MediaError(e.to_string()))?;
-        let response = client
-            .get(url)
-            .send()
+    /// Download video bytes from a provider-returned URL.
+    ///
+    /// The shared [`fetch_media`] path enforces HTTPS, DNS pinning, redirect
+    /// re-validation, timeouts, byte caps, and video container signatures.
+    async fn download_video_bytes(&self, url: &str) -> Result<(Bytes, String), VideoError> {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| VideoError::MediaError(format!("invalid video URL: {e}")))?;
+        let bytes = self
+            .downloader
+            .download(&parsed, MediaKind::Video)
             .await
             .map_err(|e| VideoError::MediaError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(VideoError::MediaError(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        let mime = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("video/mp4")
+        let mime = MediaKind::Video
+            .detect_mime(&bytes)
+            .ok_or_else(|| VideoError::MediaError("unsupported video signature".into()))?
             .to_owned();
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| VideoError::MediaError(e.to_string()))?;
-
         Ok((bytes, mime))
     }
 }
@@ -113,7 +112,7 @@ where
 
         let upstream_url = self.adapter.generate_video_raw(&req).await?;
 
-        let (video_bytes, mime_type) = Self::download_video_bytes(&upstream_url).await?;
+        let (video_bytes, mime_type) = self.download_video_bytes(&upstream_url).await?;
 
         let created = cleanup::now_unix();
         let metadata = MediaMetadata {

@@ -27,6 +27,20 @@ use gemini_bridge_adapter_video::{
 };
 use gemini_bridge_media_store::LocalMediaStore;
 
+use gemini_bridge_upload::{
+    MediaDownloader, MediaFetchPolicy, MediaKind, UploadError, fetch_media,
+};
+use url::Url;
+
+struct TestLocalDownloader;
+
+#[async_trait]
+impl MediaDownloader for TestLocalDownloader {
+    async fn download(&self, url: &Url, kind: MediaKind) -> Result<Bytes, UploadError> {
+        fetch_media(url, kind, &MediaFetchPolicy::test_local()).await
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn make_request(prompt: &str) -> VideoGenerationRequest {
@@ -304,7 +318,8 @@ async fn supported_generation_url_response_shape() {
     let config = VideoConfig { enabled: true };
     let store = make_store(&dir);
     let adapter = Arc::new(FakeVideoAdapter { video_url });
-    let service = DefaultVideoService::new(config, adapter, store);
+    let service =
+        DefaultVideoService::with_downloader(config, adapter, store, Arc::new(TestLocalDownloader));
 
     let resp = service.generate(make_request("cat video")).await.unwrap();
 
@@ -355,7 +370,8 @@ async fn supported_generation_b64_response_decodable() {
     let config = VideoConfig { enabled: true };
     let store = make_store(&dir);
     let adapter = Arc::new(FakeVideoAdapter { video_url });
-    let service = DefaultVideoService::new(config, adapter, store);
+    let service =
+        DefaultVideoService::with_downloader(config, adapter, store, Arc::new(TestLocalDownloader));
 
     let req = VideoGenerationRequest {
         prompt: "cat video".into(),
@@ -406,7 +422,8 @@ async fn get_video_returns_bytes_and_mime() {
     let adapter = Arc::new(FakeVideoAdapter {
         video_url: video_url.clone(),
     });
-    let service = DefaultVideoService::new(config, adapter, store);
+    let service =
+        DefaultVideoService::with_downloader(config, adapter, store, Arc::new(TestLocalDownloader));
 
     // First: generate and cache the video.
     let resp = service.generate(make_request("cat video")).await.unwrap();

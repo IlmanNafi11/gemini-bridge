@@ -6,10 +6,14 @@ use std::sync::Arc;
 use url::Url;
 
 pub mod error;
+pub mod media_fetch;
 pub mod push_client;
 pub mod ssrf;
 
 pub use error::UploadError;
+pub use media_fetch::{
+    HardenedMediaDownloader, MediaDownloader, MediaFetchPolicy, MediaKind, fetch_media,
+};
 pub use push_client::{HttpPushUploadClient, PushUploadClient};
 pub use ssrf::{is_address_allowed, resolve_and_check};
 
@@ -81,77 +85,12 @@ where
     }
 
     async fn fetch_reference(&self, url: Url) -> Result<Bytes, UploadError> {
-        let mut current_url = validate_reference_url(&url)?;
-        for _ in 0..=5 {
-            let (host, port) = reference_host_port(&current_url)?;
-            let pinned_ip = resolve_and_check(&host).await?;
-            // Pin the connection to the validated address so the hostname is
-            // never re-resolved after the check (DNS rebinding defense).
-            let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .resolve(&host, std::net::SocketAddr::new(pinned_ip, port))
-                .build()
-                .map_err(|_| UploadError::SsrfDenied("reference client build failed".into()))?;
-            let mut response = client
-                .get(current_url.clone())
-                .send()
-                .await
-                .map_err(|_| UploadError::SsrfDenied("reference fetch failed".into()))?;
-            if response.status().is_redirection() {
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or_else(|| {
-                        UploadError::SsrfDenied("redirect had no valid Location".into())
-                    })?;
-                current_url = validate_redirect_target(&current_url, location)?;
-                continue;
-            }
-            if !response.status().is_success() {
-                return Err(UploadError::InvalidUrl(format!(
-                    "reference responded with status {}",
-                    response.status()
-                )));
-            }
-            if let Some(length) = response.content_length()
-                && length > self.limits.max_bytes
-            {
-                return Err(UploadError::TooLarge {
-                    limit: self.limits.max_bytes,
-                    received: length,
-                });
-            }
-            let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| UploadError::InvalidUrl("reference response body failed".into()))?
-            {
-                let received = body.len().saturating_add(chunk.len()) as u64;
-                if received > self.limits.max_bytes {
-                    return Err(UploadError::TooLarge {
-                        limit: self.limits.max_bytes,
-                        received,
-                    });
-                }
-                body.extend_from_slice(&chunk);
-            }
-            return Ok(Bytes::from(body));
-        }
-        Err(UploadError::SsrfDenied("too many redirects".into()))
+        // Caller-supplied references retain their documented public HTTP(S)
+        // behavior. The shared mechanism still validates credentials, all DNS
+        // answers, every redirect hop, signatures, deadlines, and body bounds.
+        let policy = MediaFetchPolicy::caller_reference(self.limits.max_bytes);
+        fetch_media(&url, MediaKind::Image, &policy).await
     }
-}
-
-fn reference_host_port(url: &Url) -> Result<(String, u16), UploadError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| UploadError::SsrfDenied("URL has no host".into()))?
-        .to_string();
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| UploadError::SsrfDenied("URL has invalid port".into()))?;
-    Ok((host, port))
 }
 
 /// Enforce HTTP(S) and deny literal blocked IPs before DNS resolution.

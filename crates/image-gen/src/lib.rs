@@ -19,6 +19,8 @@ use thiserror::Error;
 use tracing::warn;
 use url::Url;
 
+use gemini_bridge_upload::{HardenedMediaDownloader, MediaDownloader, MediaKind};
+
 use gemini_bridge_llm_service::{
     ContentPart, LlmAdapter, LlmRequest, Message, ModelSelector, Role,
 };
@@ -122,6 +124,7 @@ pub struct DefaultImageGenService<S, U> {
     adapter: Arc<dyn LlmAdapter>,
     store: S,
     upload: Arc<U>,
+    downloader: Arc<dyn MediaDownloader>,
     /// Default model alias forwarded to the adapter.
     default_model: String,
 }
@@ -137,10 +140,28 @@ where
         upload: Arc<U>,
         default_model: impl Into<String>,
     ) -> Self {
+        Self::with_downloader(
+            adapter,
+            store,
+            upload,
+            default_model,
+            Arc::new(HardenedMediaDownloader),
+        )
+    }
+
+    /// Construct with an injectable media downloader for deterministic tests.
+    pub fn with_downloader(
+        adapter: Arc<dyn LlmAdapter>,
+        store: S,
+        upload: Arc<U>,
+        default_model: impl Into<String>,
+        downloader: Arc<dyn MediaDownloader>,
+    ) -> Self {
         Self {
             adapter,
             store,
             upload,
+            downloader,
             default_model: default_model.into(),
         }
     }
@@ -200,28 +221,18 @@ where
         Arc::from(parts)
     }
 
-    /// Download image bytes from a URL returned by the extractor.
-    async fn download_image(url: &str) -> Result<Bytes, ImageGenError> {
-        // We're fetching from Google's own CDN — no SSRF validation required.
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| ImageGenError::ImageDownloadFailed(e.to_string()))?;
-        let response = client
-            .get(url)
-            .send()
+    /// Download image bytes from a provider-returned CDN URL.
+    ///
+    /// The shared [`fetch_media`] path enforces HTTPS, an exact
+    /// `googleusercontent.com` host boundary, DNS pinning, redirect
+    /// re-validation, timeouts, byte caps, and image magic-byte signatures.
+    async fn download_image(&self, url: &str) -> Result<Bytes, ImageGenError> {
+        let parsed = Url::parse(url)
+            .map_err(|e| ImageGenError::ImageDownloadFailed(format!("invalid URL: {e}")))?;
+        self.downloader
+            .download(&parsed, MediaKind::Image)
             .await
-            .map_err(|e| ImageGenError::ImageDownloadFailed(e.to_string()))?;
-        if !response.status().is_success() {
-            return Err(ImageGenError::ImageDownloadFailed(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ImageGenError::ImageDownloadFailed(e.to_string()))?;
-        Ok(bytes)
+            .map_err(|e| ImageGenError::ImageDownloadFailed(e.to_string()))
     }
 
     fn unix_now() -> i64 {
@@ -294,18 +305,34 @@ where
             return Err(ImageGenError::NoImageExtracted);
         }
 
-        let use_b64 = req.response_format.as_deref().unwrap_or("url") == "b64_json";
+        let requested_count = req.n.unwrap_or(1);
+        if requested_count == 0 {
+            return Err(ImageGenError::Validation("n must be at least 1".into()));
+        }
+        image_urls.truncate(requested_count as usize);
+
+        let use_b64 = match req.response_format.as_deref().unwrap_or("url") {
+            "url" => false,
+            "b64_json" => true,
+            other => {
+                return Err(ImageGenError::Validation(format!(
+                    "invalid response_format '{other}', must be 'url' or 'b64_json'"
+                )));
+            }
+        };
 
         let created = Self::unix_now();
         let mut results = Vec::with_capacity(image_urls.len());
 
         for url in &image_urls {
-            // 5. Download image bytes.
-            let image_bytes = Self::download_image(url).await?;
-
-            // Detect MIME type from magic bytes; fall back to a safe default.
-            let mime_type = gemini_bridge_upload::detect_mime(&image_bytes)
-                .unwrap_or("image/png")
+            let image_bytes = self.download_image(url).await?;
+            let mime_type = MediaKind::Image
+                .detect_mime(&image_bytes)
+                .ok_or_else(|| {
+                    ImageGenError::ImageDownloadFailed(
+                        "downloaded content has no supported image signature".into(),
+                    )
+                })?
                 .to_owned();
 
             // 6. Cache in media-store with generation metadata.

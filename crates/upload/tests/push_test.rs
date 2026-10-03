@@ -109,6 +109,50 @@ async fn push_upload_two_step_flow_succeeds() {
 }
 
 #[tokio::test]
+async fn push_upload_initiation_retries_transient_disconnect_then_succeeds() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let session_url = format!("http://{address}/upload-session/retried");
+
+    let server = tokio::spawn({
+        let session_url = session_url.clone();
+        async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0_u8; 4096];
+                let read = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                    .await
+                    .unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.starts_with("POST /upload/ "));
+                assert!(request.contains("x-goog-upload-command: start"));
+                if attempt == 1 {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nX-Goog-Upload-URL: {session_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    });
+
+    let client = HttpPushUploadClient::with_endpoint(
+        Arc::new(DummyIdentity),
+        transport(),
+        format!("http://{address}/upload/"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        client.initiate_session("image/png", 10).await.unwrap(),
+        session_url
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn push_upload_initiate_surfaces_upstream_failure() {
     // Transient transport retries are the shared transport layer's job: this
     // call marks initiation SafeToRetry. A non-transient HTTP status surfaces.

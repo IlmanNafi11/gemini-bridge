@@ -6,45 +6,37 @@ use crate::error::UploadError;
 
 // ── Public helpers ──────────────────────────────────────────────────────────
 
-/// Returns `true` if the resolved IP address is safe to connect to.
+/// Returns `true` only when the address is publicly routable.
 ///
-/// Blocked IPv4 ranges:
-/// - Loopback: 127.0.0.0/8
-/// - All-zeros: 0.0.0.0/8
-/// - Private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-/// - Link-local: 169.254.0.0/16
-/// - Carrier-grade NAT: 100.64.0.0/10
-/// - Broadcast: 255.255.255.255
-///
-/// Blocked IPv6 ranges:
-/// - Loopback: ::1
-/// - Unspecified: ::
-/// - Unique-local: fc00::/7 (fc00:: – fdff::)
-/// - Link-local: fe80::/10
-/// - IPv4-mapped private (::ffff:A.B.C.D where A.B.C.D is blocked IPv4)
+/// Private, loopback, link-local, shared, documentation, benchmarking,
+/// protocol-assignment, multicast, unspecified, and reserved ranges are
+/// rejected for both IPv4 and IPv6. IPv4-mapped/compatible IPv6 addresses are
+/// evaluated as IPv4.
 pub fn is_address_allowed(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => !is_blocked_v4(v4),
         IpAddr::V6(v6) => {
-            // Check if it's an IPv4-mapped address (::ffff:A.B.C.D)
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            if let Some(v4) = v6.to_ipv4() {
                 return !is_blocked_v4(v4);
             }
             let segments = v6.segments();
-            // Loopback (::1)
-            if v6 == std::net::Ipv6Addr::LOCALHOST {
+            if v6.is_unspecified() || v6.is_loopback() {
                 return false;
             }
-            // Unspecified (::)
-            if v6 == std::net::Ipv6Addr::UNSPECIFIED {
+            // Globally routable unicast is limited to 2000::/3.
+            if segments[0] & 0xe000 != 0x2000 {
                 return false;
             }
-            // Unique-local: fc00::/7 — first segment high bits 1111110x
-            if (segments[0] & 0xfe00) == 0xfc00 {
+            // IETF protocol assignments 2001::/23.
+            if segments[0] == 0x2001 && segments[1] < 0x0200 {
                 return false;
             }
-            // Link-local: fe80::/10 — first segment high bits 1111111010
-            if (segments[0] & 0xffc0) == 0xfe80 {
+            // Documentation range 2001:db8::/32.
+            if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+                return false;
+            }
+            // 6to4 can tunnel private IPv4 destinations.
+            if segments[0] == 0x2002 {
                 return false;
             }
             true
@@ -53,40 +45,37 @@ pub fn is_address_allowed(ip: IpAddr) -> bool {
 }
 
 fn is_blocked_v4(v4: Ipv4Addr) -> bool {
-    let octets = v4.octets();
-    // 0.0.0.0/8
-    if octets[0] == 0 {
-        return true;
+    let [a, b, c, _] = v4.octets();
+    matches!(a, 0 | 10 | 127)
+        || (a == 100 && (64..=127).contains(&b)) // Shared address space.
+        || (a == 169 && b == 254) // Link-local.
+        || (a == 172 && (16..=31).contains(&b)) // Private.
+        || (a == 192 && b == 0 && c == 0) // IETF protocol assignments.
+        || (a == 192 && b == 0 && c == 2) // Documentation TEST-NET-1.
+        || (a == 192 && b == 88 && c == 99) // Deprecated relay anycast.
+        || (a == 192 && b == 168) // Private.
+        || (a == 198 && (b == 18 || b == 19)) // Benchmarking.
+        || (a == 198 && b == 51 && c == 100) // Documentation TEST-NET-2.
+        || (a == 203 && b == 0 && c == 113) // Documentation TEST-NET-3.
+        || a >= 224 // Multicast and reserved.
+}
+
+fn select_allowed_address(host: &str, addrs: &[IpAddr]) -> Result<IpAddr, UploadError> {
+    if addrs.is_empty() {
+        return Err(UploadError::DnsResolutionFailed(format!(
+            "no addresses resolved for {host}"
+        )));
     }
-    // Loopback 127.0.0.0/8
-    if v4.is_loopback() {
-        return true;
+
+    for ip in addrs {
+        if !is_address_allowed(*ip) {
+            return Err(UploadError::SsrfDenied(format!(
+                "resolved address {ip} for host {host} is in a blocked range"
+            )));
+        }
     }
-    // Private: 10.0.0.0/8
-    if octets[0] == 10 {
-        return true;
-    }
-    // Private: 172.16.0.0/12
-    if octets[0] == 172 && (16..=31).contains(&octets[1]) {
-        return true;
-    }
-    // Private: 192.168.0.0/16
-    if octets[0] == 192 && octets[1] == 168 {
-        return true;
-    }
-    // Link-local: 169.254.0.0/16
-    if octets[0] == 169 && octets[1] == 254 {
-        return true;
-    }
-    // Carrier-grade NAT: 100.64.0.0/10
-    if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-        return true;
-    }
-    // Broadcast
-    if v4 == Ipv4Addr::BROADCAST {
-        return true;
-    }
-    false
+
+    Ok(addrs[0])
 }
 
 /// Resolve `host` to IP addresses and reject if any resolved IP is blocked.
@@ -101,19 +90,24 @@ pub async fn resolve_and_check(host: &str) -> Result<IpAddr, UploadError> {
         .map(|sa| sa.ip())
         .collect();
 
-    if addrs.is_empty() {
-        return Err(UploadError::DnsResolutionFailed(format!(
-            "no addresses resolved for {host}"
-        )));
-    }
+    select_allowed_address(host, &addrs)
+}
 
-    for ip in &addrs {
-        if !is_address_allowed(*ip) {
-            return Err(UploadError::SsrfDenied(format!(
-                "resolved address {ip} for host {host} is in a blocked range"
-            )));
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(addrs[0])
+    #[test]
+    fn mixed_dns_answers_are_rejected_when_any_address_is_blocked() {
+        let answers = [
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        ];
+
+        assert!(matches!(
+            select_allowed_address("media.example", &answers),
+            Err(UploadError::SsrfDenied(message))
+                if message.contains("127.0.0.1") && message.contains("media.example")
+        ));
+    }
 }

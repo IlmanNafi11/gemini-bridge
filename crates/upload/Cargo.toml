@@ -13,14 +13,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 sha2 = { workspace = true }
-futures = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
-tracing = { workspace = true }
 gemini-bridge-media-store = { path = "../media-store" }
 gemini-bridge-identity = { path = "../identity" }
 gemini-bridge-transport = { path = "../transport" }
-
 [dev-dependencies]
 gemini-bridge-config = { path = "../config" }
 tokio = { workspace = true }

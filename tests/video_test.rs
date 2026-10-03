@@ -20,10 +20,10 @@ use gemini_bridge_llm_service::{
     Completion, LlmAdapter, LlmError, LlmEvent, LlmEventStream, LlmRequest,
 };
 use gemini_bridge_media_store::LocalMediaStore;
+use gemini_bridge_upload::{MediaDownloader, MediaKind, UploadError};
+use reqwest::Url;
 use serde_json::Value;
 use tempfile::TempDir;
-use wiremock::matchers::method;
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 struct NoopAdapter;
 
@@ -55,6 +55,16 @@ impl VideoAdapter for MockVideoAdapter {
         _req: &VideoGenerationRequest,
     ) -> Result<String, VideoError> {
         Ok(self.url.clone())
+    }
+}
+
+struct FixedVideoDownloader;
+
+#[async_trait]
+impl MediaDownloader for FixedVideoDownloader {
+    async fn download(&self, _url: &Url, kind: MediaKind) -> Result<Bytes, UploadError> {
+        assert_eq!(kind, MediaKind::Video);
+        Ok(test_video_bytes())
     }
 }
 
@@ -92,6 +102,7 @@ async fn spawn_server(
         image_service: None,
         video_service,
         health_admin: gemini_bridge_http_server::build_health_admin(None),
+        identity_service: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,
@@ -207,26 +218,15 @@ async fn validation_error_returns_400() {
 
 #[tokio::test]
 async fn supported_generation_returns_openai_image_schema() {
-    let upstream = MockServer::start().await;
-    let expected_bytes = test_video_bytes();
-
-    Mock::given(method("GET"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_bytes(expected_bytes.as_ref())
-                .insert_header("content-type", "video/mp4"),
-        )
-        .mount(&upstream)
-        .await;
-
     let temp = TempDir::new().unwrap();
     let store = LocalMediaStore::new(temp.path());
-    let service = Arc::new(DefaultVideoService::new(
+    let service = Arc::new(DefaultVideoService::with_downloader(
         VideoConfig { enabled: true },
         Arc::new(MockVideoAdapter {
-            url: format!("{}/video.mp4", upstream.uri()),
+            url: "https://video.example/clip.mp4".into(),
         }),
         store,
+        Arc::new(FixedVideoDownloader),
     ));
 
     let (base, _) = spawn_server(Some(service)).await;
@@ -271,31 +271,20 @@ async fn supported_generation_returns_openai_image_schema() {
         "video/mp4"
     );
     let retrieved_bytes = get_resp.bytes().await.unwrap();
-    assert_eq!(retrieved_bytes.as_ref(), expected_bytes.as_ref());
+    assert_eq!(retrieved_bytes, test_video_bytes());
 }
 
 #[tokio::test]
 async fn b64_json_response_format_returns_valid_base64() {
-    let upstream = MockServer::start().await;
-    let expected_bytes = test_video_bytes();
-
-    Mock::given(method("GET"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_bytes(expected_bytes.as_ref())
-                .insert_header("content-type", "video/mp4"),
-        )
-        .mount(&upstream)
-        .await;
-
     let temp = TempDir::new().unwrap();
     let store = LocalMediaStore::new(temp.path());
-    let service = Arc::new(DefaultVideoService::new(
+    let service = Arc::new(DefaultVideoService::with_downloader(
         VideoConfig { enabled: true },
         Arc::new(MockVideoAdapter {
-            url: format!("{}/clip.mp4", upstream.uri()),
+            url: "https://video.example/clip.mp4".into(),
         }),
         store,
+        Arc::new(FixedVideoDownloader),
     ));
 
     let (base, _) = spawn_server(Some(service)).await;
@@ -320,7 +309,7 @@ async fn b64_json_response_format_returns_valid_base64() {
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .expect("valid base64");
-    assert_eq!(decoded, expected_bytes.as_ref());
+    assert_eq!(decoded, test_video_bytes());
 }
 
 #[tokio::test]
