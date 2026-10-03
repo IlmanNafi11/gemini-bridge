@@ -11,15 +11,15 @@
 
 ## 1. Objective & Responsibility
 
-The `media-store` module provides content-addressed local filesystem storage for generated images and uploaded media files, using SHA-256 hashes as the content identity key. It decouples media payload storage from SQLite database persistence, manages per-item metadata (prompt, model, MIME type, dimensions, creation timestamp, TTL expiration), guarantees deduplication, handles safe concurrent writes, and provides TTL-based expiry cleanup and administrative purge primitives.
+The `media-store` module provides content-addressed local filesystem storage for generated images and uploaded media files, using SHA-256 hashes as the content identity key. It decouples media payload storage from SQLite metadata persistence, manages per-item metadata (prompt, model, MIME type, creation timestamp, expiry timestamp), guarantees deduplication, handles safe concurrent writes, marks records with TTL-based expiry, and provides an explicit administrative purge primitive. Expiry does not trigger scheduled or automatic deletion.
 
 **In scope:**
 - Content-addressed storage on the local filesystem under `{data_dir}/media/{sha256[0..2]}/{sha256}`.
-- JSON metadata sidecars stored under `{data_dir}/media/meta/{id}.json`.
-- Idempotent content writing (content bytes with identical SHA-256 are never duplicated or overwritten).
-- Metadata CRUD operations (`put`, `get`, `exists`, `find_by_hash`, `list`, `delete`).
-- Pagination and sorting of stored media records (newest first).
-- Expiration calculation and TTL purge (`purge_expired`) removing only expired items and unreferenced content files.
+- JSON metadata sidecars stored under `{data_dir}/media/meta/{id}.json`, with a durable SQLite metadata index for bounded filtered queries and rebuild/recovery.
+- Idempotent content writing (content bytes with identical SHA-256 are never duplicated or overwritten), including stable-ID replacement with reference-safe cleanup.
+- Metadata CRUD operations (`put`, `get`, `exists`, `find_by_hash`, `list`, bounded `list_filtered`, `delete`).
+- Pagination and sorting of stored media records (newest first), capped at 200 rows per operation.
+- Expiration calculation and explicit admin-triggered TTL purge (`purge_expired`), removing only expired metadata and unreferenced content files; no scheduled cleanup is performed by this module.
 - Strict path traversal prevention on all input identifiers and hashes.
 
 **Out of scope:**
@@ -54,8 +54,8 @@ pub struct MediaMetadata {
     pub size_bytes: u64,
     /// Unix timestamp (seconds) when the record was created.
     pub created_at: i64,
-    /// Optional Unix timestamp (seconds) after which the record is eligible
-    /// for purge. `None` means the record never expires.
+    /// Optional Unix timestamp (seconds) after which the record is marked expired
+    /// and eligible for an explicit administrative purge. `None` means the record never expires.
     pub expires_at: Option<i64>,
     /// Optional generation prompt (for image/video records).
     pub prompt: Option<String>,
@@ -86,6 +86,9 @@ pub enum StoreError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
 }
 ```
 
@@ -93,9 +96,25 @@ pub enum StoreError {
 
 ```rust
 use bytes::Bytes;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+/// Maximum number of metadata rows returned by one list operation.
+pub const MAX_LIST_PAGE_SIZE: usize = 200;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataFilter {
+    pub prompt_contains: Option<String>,
+    pub model: Option<String>,
+    pub created_at_from: Option<i64>,
+    pub created_at_to: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPage {
+    pub items: Vec<MediaMetadata>,
+    pub total: usize,
+}
 
 /// The public `MediaStore` trait. All callers and tests work against this
 /// interface — not against the concrete implementation.
@@ -108,6 +127,8 @@ pub trait MediaStore: Send + Sync {
     ///   SHA-256 of `content`, the call fails with [`StoreError::HashMismatch`].
     /// * If `metadata.sha256` is empty it is computed and filled in.
     /// * If `metadata.id` is empty a fresh UUID is generated.
+    /// * If `metadata.id` names an existing record, its metadata is replaced and
+    ///   no-longer-referenced prior content is removed.
     /// * If the content file already exists on disk (same SHA-256) it is NOT
     ///   overwritten — the call is idempotent for the content bytes.
     async fn put(
@@ -127,27 +148,41 @@ pub trait MediaStore: Send + Sync {
     async fn find_by_hash(&self, sha256: &str) -> Option<String>;
 
     /// List metadata records sorted descending by `created_at` (newest first),
-    /// with `id` as a stable tie-breaker.
+    /// with `id` as a stable tie-breaker. At most 200 records are returned,
+    /// even if `limit` is larger.
     async fn list(&self, limit: usize, offset: usize) -> Vec<MediaMetadata>;
+
+    /// Filter and paginate through the durable index without scanning every
+    /// sidecar. The result contains a bounded page and matching-row total.
+    async fn list_filtered(
+        &self,
+        filter: MetadataFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<MetadataPage, StoreError>;
 
     /// Remove the metadata record for `id`. If no other metadata record
     /// references the same `sha256`, the content file is also removed.
     async fn delete(&self, id: &str) -> Result<(), StoreError>;
 
-    /// Remove all metadata records whose `expires_at` is in the past, plus
-    /// any unreferenced content files. Returns the number of records purged.
+    /// Explicitly remove metadata records whose `expires_at` is in the past, plus
+    /// any unreferenced content files. Nothing invokes this on a schedule;
+    /// returns the number of records purged.
     async fn purge_expired(&self) -> Result<usize, StoreError>;
 }
 
-/// Filesystem-backed content-addressed media store.
+/// Filesystem-backed content-addressed media store, with durable SQLite index.
 #[derive(Clone)]
 pub struct LocalMediaStore {
     data_dir: PathBuf,
-    mutation_lock: Arc<Mutex<()>>,
+    default_ttl_days: u32,
+    index: Arc<MetadataIndex>,
 }
 
 impl LocalMediaStore {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self;
+    /// Apply a default expiry to records that do not already specify one.
+    pub fn with_default_ttl_days(self, ttl_days: u32) -> Self;
 }
 ```
 
@@ -164,6 +199,7 @@ pub mod cleanup {
     pub fn now_unix() -> i64;
 
     /// Compute default expiry timestamp from `created_at` + `ttl_days` (86400s per day).
+    /// Expiry marks the record as eligible for manual purge; it does not delete it.
     /// Returns `None` if `ttl_days == 0`.
     pub fn compute_default_expiry(created_at: i64, ttl_days: u32) -> Option<i64>;
 }
@@ -176,23 +212,23 @@ pub mod cleanup {
 1. **Content Addressing & Sharding:**
    Files are stored at `{data_dir}/media/{sha256[0..2]}/{sha256}`. The two-character hex prefix shards files across 256 subdirectories to prevent filesystem performance degradation from flat directory saturation.
 
-2. **Atomic Metadata Persistence:**
-   Metadata records are serialized to JSON and written via temporary files (`{data_dir}/media/meta/{id}.json.tmp.{uuid}`) followed by atomic filesystem rename (`tokio::fs::rename`). This prevents partial or corrupted metadata reads during concurrent access or process interruption.
+2. **Durable Index and Sidecar Recovery:**
+   SQLite indexes metadata and supports bounded, filtered/paginated queries. Metadata sidecars remain the durable record source; the index is rebuilt/recovered from sidecars when its persisted state indicates an incomplete mutation or invalid index data.
 
-3. **Content Idempotency & Deduplication:**
-   `put` with content matching an existing SHA-256 skips rewriting content bytes. Multiple metadata records may reference the same SHA-256 content object.
+3. **Atomic Metadata Persistence:**
+   Metadata records are serialized to JSON and written via per-write temporary files (`{data_dir}/media/meta/.{id}.{uuid}.tmp`) followed by atomic filesystem rename (`tokio::fs::rename`).
 
-4. **Reference-Counted Deletion:**
-   When `delete(id)` or `purge_expired()` removes a metadata record, it checks whether any remaining metadata record references the same `sha256`. The content file is removed from disk **only** when reference count reaches zero.
+4. **Content Idempotency & Stable-ID Replacement:**
+   `put` with content matching an existing SHA-256 skips rewriting content bytes. Multiple metadata records may reference the same SHA-256. Replacing a record under an existing stable `id` releases old content only if no other metadata record references it.
 
-5. **Purge Safety:**
-   `purge_expired()` evaluates `expires_at < now_unix()`. Items with `expires_at == None` or `expires_at >= now_unix()` are guaranteed to be preserved.
+5. **Reference-Counted Deletion:**
+   When `delete(id)` or an explicit `purge_expired()` call removes a metadata record, it checks whether any remaining metadata record references the same `sha256`. The content file is removed from disk **only** when reference count reaches zero.
 
-6. **Path Traversal Sanitization:**
-   IDs and SHA-256 strings containing `/`, `\`, `..`, null bytes, or non-hex/alphanumeric characters are strictly rejected with `StoreError::NotFound`, guaranteeing that reads and writes never escape `{data_dir}/media`.
+6. **Expiry and Purge Safety:**
+   `expires_at` marks when an item becomes eligible for purge; it is not an automatic deletion timer. `purge_expired()` evaluates `expires_at < now_unix()`. Items with `expires_at == None` or `expires_at >= now_unix()` are preserved. Purging occurs only when the administrator explicitly invokes the protected purge operation.
 
-7. **Concurrent Safety:**
-   Mutations (`put`, `delete`, `purge_expired`) acquire an asynchronous mutex (`mutation_lock`) to serialize file creation and reference verification, avoiding race conditions between simultaneous delete and put operations.
+7. **Private Storage and Concurrency:**
+   On Unix, store directories are mode `0700`, and content, metadata, lock, and SQLite files are mode `0600`. Mutations use a filesystem lock to serialize across cloned stores, independent handles, and processes; interrupted indexed mutations are recovered through the durable sidecar/index recovery path.
 
 ---
 
@@ -208,7 +244,7 @@ pub mod cleanup {
 | US-3 (Deduplication) | Reuse fileRef based on content hash | `find_by_hash(sha256)` / `exists(sha256)` |
 | US-6 (Gallery & Media Mgmt) | List stored media with pagination & sort | `list(limit, offset)` sorted descending by `created_at` |
 | US-6 (Gallery Operations) | Delete stored media | `delete(id)` with unreferenced content cleanup |
-| US-6 (TTL Expiry) | Automatic media purge after configured TTL | `purge_expired()` with `compute_default_expiry` |
+| US-6 (TTL Expiry) | Mark records expired after configured TTL; remove them only on admin request | `compute_default_expiry` records eligibility; protected `/admin/purge` invokes `purge_expired()` manually |
 
 ### Module-Level Acceptance Criteria
 
@@ -216,10 +252,13 @@ pub mod cleanup {
 2. `put` with mismatched `metadata.sha256` returns `StoreError::HashMismatch` without writing files.
 3. Storing identical content bytes twice creates two metadata records pointing to the same single content file on disk.
 4. `get(id)` returns the exact stored bytes and complete metadata struct; returns `StoreError::NotFound` for unknown or malformed IDs.
-5. `list(limit, offset)` returns items sorted by `created_at` descending, respecting pagination bounds.
-6. `delete(id)` deletes the metadata record; deletes the sharded content file if and only if no other metadata record references that SHA-256.
-7. `purge_expired()` deletes all records where `expires_at < now_unix()`, cleans up unreferenced content files, and returns the exact count of purged items.
-8. IDs containing path traversal patterns (`../`, `..\\`) are rejected without error leaks or filesystem escapes.
+5. `list(limit, offset)` and `list_filtered(...)` use the durable index, sort by `created_at` then stable `id`, honor pagination, and cap a page at 200 records.
+6. Reopening after index deletion/corruption or an interrupted mutation rebuilds a consistent index from metadata sidecars.
+7. Replacing metadata under a stable `id` removes the old content only when no other record references it.
+8. `delete(id)` deletes the metadata record; deletes the sharded content file if and only if no other metadata record references that SHA-256.
+9. An explicit `purge_expired()` call deletes records where `expires_at < now_unix()`, cleans up unreferenced content files, and returns the exact count of purged items. Expired records remain stored until that call is made.
+10. Store paths/files use mode `0700`/`0600` on Unix, and concurrent independent store handles/processes serialize mutations through the filesystem lock.
+11. IDs containing path traversal patterns (`../`, `..\\`) are rejected without error leaks or filesystem escapes.
 
 ---
 
@@ -235,11 +274,16 @@ pub mod cleanup {
   - `delete_reference_counting`: Test delete with single reference (content removed) vs. dual reference (content retained until second delete).
   - `purge_expired_behavior`: Verify past-due items purged, active items retained, boundary timestamp (`expires_at == now`) preserved.
   - `path_traversal_rejection`: Test `../escape` and `..\\escape` IDs return `NotFound`.
+  - `list_filtered_uses_stable_bounded_pagination`: Verify filters, deterministic tie ordering, matching-row totals, and the 200-row cap.
+  - `index_rebuild_and_interrupted_mutation_recovery`: Delete/corrupt the index or leave recovery state and verify sidecar-driven recovery.
+  - `stable_id_replacement_is_reference_safe`: Replace a record's content and preserve any old content still referenced elsewhere.
+  - `cross_handle_and_process_mutations_are_serialized`: Exercise independently constructed handles and subprocess writers.
+  - Unix permission tests assert `0700` directories and `0600` content, metadata, lock, and SQLite files.
 
 ---
 
 ## 6. Boundaries
 
-- **Always:** Shard content files under `{data_dir}/media/{sha256[0..2]}/{sha256}`; compute SHA-256 over raw bytes; write metadata atomically; guard against path traversal; serialize mutations.
+- **Always:** Shard content files under `{data_dir}/media/{sha256[0..2]}/{sha256}`; compute SHA-256 over raw bytes; write metadata atomically; guard against path traversal; serialize mutations; describe expiry as a purge eligibility marker, not scheduled deletion.
 - **Ask First:** Changing directory layout, metadata JSON schema, or default TTL period.
 - **Never:** Overwrite existing content bytes for a given SHA-256; delete content files that are still referenced by other metadata; log or store session tokens/credentials in media metadata; panic on IO errors.

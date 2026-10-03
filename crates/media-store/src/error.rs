@@ -13,4 +13,7 @@ pub enum StoreError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
 }

@@ -134,8 +134,34 @@ async fn deduplication_same_sha256_one_content_file() {
 
     // There must be exactly one content file (not two)
     let hash = &meta1.sha256;
+
     let content_path = dir.path().join("media").join(&hash[..2]).join(hash);
     assert!(content_path.exists(), "content file should exist");
+}
+
+#[tokio::test]
+async fn put_replaces_existing_metadata_id_without_leaking_old_content() {
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    let mut metadata = make_meta("text/plain");
+    metadata.id = "stable-id".into();
+
+    let first_id = s
+        .put(Bytes::from_static(b"first content"), metadata.clone())
+        .await
+        .unwrap();
+    let (_, first) = s.get(&first_id).await.unwrap();
+
+    let second_id = s
+        .put(Bytes::from_static(b"second content"), metadata)
+        .await
+        .unwrap();
+    assert_eq!(second_id, first_id);
+    let (bytes, second) = s.get(&second_id).await.unwrap();
+    assert_eq!(bytes, Bytes::from_static(b"second content"));
+    assert_ne!(second.sha256, first.sha256);
+    assert!(!s.exists(&first.sha256).await);
+    assert!(s.exists(&second.sha256).await);
 }
 
 // ── exists ────────────────────────────────────────────────────────────────────
@@ -403,4 +429,379 @@ async fn delete_rejects_path_traversal_id() {
         s.delete("../secret").await,
         Err(StoreError::NotFound(_))
     ));
+}
+
+// ── restrictive permissions (unix) ───────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test]
+async fn data_files_and_dirs_are_private_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+
+    let id = s
+        .put(
+            Bytes::from_static(b"private bytes"),
+            make_meta("text/plain"),
+        )
+        .await
+        .unwrap();
+    let (_, meta) = s.get(&id).await.unwrap();
+    let sha = &meta.sha256;
+
+    let content_path = dir.path().join("media").join(&sha[..2]).join(sha);
+    let meta_path = dir
+        .path()
+        .join("media")
+        .join("meta")
+        .join(format!("{id}.json"));
+
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&content_path),
+        0o600,
+        "content file must be owner-only"
+    );
+    assert_eq!(mode(&meta_path), 0o600, "metadata file must be owner-only");
+
+    for directory in [
+        dir.path().to_path_buf(),
+        dir.path().join("media"),
+        dir.path().join("media").join("meta"),
+        content_path.parent().unwrap().to_path_buf(),
+    ] {
+        assert_eq!(mode(&directory), 0o700, "{directory:?} must be owner-only");
+    }
+
+    for suffix in ["", "-wal", "-shm"] {
+        let db = dir.path().join(format!("media/index.sqlite{suffix}"));
+        if db.exists() {
+            assert_eq!(mode(&db), 0o600, "index file must be owner-only");
+        }
+    }
+}
+
+// ── concurrent same-content puts ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn concurrent_puts_of_same_content_from_clones_share_one_content_file() {
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    let clone = s.clone();
+    let content = Bytes::from_static(b"clone race bytes");
+
+    let (first, second) = tokio::join!(
+        s.put(content.clone(), make_meta("image/png")),
+        clone.put(content.clone(), make_meta("image/png")),
+    );
+    let id1 = first.unwrap();
+    let id2 = second.unwrap();
+    assert_ne!(id1, id2, "distinct records must get distinct ids");
+
+    let (_, m1) = s.get(&id1).await.unwrap();
+    let (_, m2) = s.get(&id2).await.unwrap();
+    assert_eq!(m1.sha256, m2.sha256);
+
+    let content_dir = dir.path().join("media").join(&m1.sha256[..2]);
+    let files: Vec<_> = std::fs::read_dir(&content_dir).unwrap().collect();
+    assert_eq!(files.len(), 1, "dedup must leave exactly one content file");
+}
+
+#[tokio::test]
+async fn concurrent_puts_of_same_content_from_independent_stores_share_one_content_file() {
+    let dir = TempDir::new().unwrap();
+    let a = store(&dir);
+    let b = store(&dir);
+    let content = Bytes::from_static(b"independent race bytes");
+
+    let (first, second) = tokio::join!(
+        a.put(content.clone(), make_meta("image/png")),
+        b.put(content.clone(), make_meta("image/png")),
+    );
+    let id1 = first.unwrap();
+    let id2 = second.unwrap();
+
+    let (_, m1) = a.get(&id1).await.unwrap();
+    let (_, m2) = b.get(&id2).await.unwrap();
+    assert_eq!(m1.sha256, m2.sha256);
+
+    let content_dir = dir.path().join("media").join(&m1.sha256[..2]);
+    let files: Vec<_> = std::fs::read_dir(&content_dir).unwrap().collect();
+    assert_eq!(files.len(), 1);
+}
+
+// ── put / delete / purge interleavings ───────────────────────────────────────
+
+#[tokio::test]
+async fn interleaved_put_delete_purge_keeps_survivors_readable() {
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+
+    let mut handles = Vec::new();
+    for i in 0..16u8 {
+        let s = s.clone();
+        handles.push(tokio::spawn(async move {
+            let content = Bytes::copy_from_slice(&[i; 32]);
+            let id = s.put(content, make_meta("text/plain")).await.unwrap();
+            if i % 2 == 0 {
+                let _ = s.delete(&id).await;
+            }
+        }));
+    }
+    let purge = s.clone();
+    let purge_task = tokio::spawn(async move {
+        let _ = purge.purge_expired().await;
+    });
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    purge_task.await.unwrap();
+
+    for metadata in s.list(usize::MAX, 0).await {
+        s.get(&metadata.id)
+            .await
+            .unwrap_or_else(|_| panic!("surviving record {} must stay readable", metadata.id));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_delete_and_put_of_shared_content_never_dangles() {
+    let dir = TempDir::new().unwrap();
+    let a = store(&dir);
+    let b = store(&dir);
+    let content = Bytes::from_static(b"delete/put race bytes");
+
+    let id1 = a
+        .put(content.clone(), make_meta("text/plain"))
+        .await
+        .unwrap();
+    let (_, meta) = a.get(&id1).await.unwrap();
+    let sha = meta.sha256.clone();
+
+    let (deleted, put) = tokio::join!(a.delete(&id1), b.put(content, make_meta("text/plain")));
+    deleted.expect("delete of existing record succeeds");
+    let id2 = put.expect("concurrent put succeeds");
+
+    let (_, survivor) = b.get(&id2).await.unwrap();
+    assert_eq!(survivor.sha256, sha);
+    assert!(
+        b.exists(&sha).await,
+        "content referenced by the surviving record must exist on disk"
+    );
+}
+
+// ── purge must never remove shared content ───────────────────────────────────
+
+#[tokio::test]
+async fn purge_preserves_shared_content_referenced_by_active_survivor() {
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    let now = now_unix();
+    let content = Bytes::from_static(b"shared purge bytes");
+
+    let mut expired_meta = make_meta("image/png");
+    expired_meta.expires_at = Some(now - 100);
+    let expired_id = s.put(content.clone(), expired_meta).await.unwrap();
+    let survivor_id = s.put(content, make_meta("image/png")).await.unwrap();
+
+    let (_, meta) = s.get(&survivor_id).await.unwrap();
+    let sha = meta.sha256.clone();
+
+    let purged = s.purge_expired().await.unwrap();
+    assert_eq!(purged, 1);
+
+    assert!(matches!(
+        s.get(&expired_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    s.get(&survivor_id).await.unwrap();
+    assert!(
+        s.exists(&sha).await,
+        "shared content must survive purge while a record references it"
+    );
+}
+
+#[tokio::test]
+async fn purge_removes_content_after_all_shared_hash_records_expire() {
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    let now = now_unix();
+    let content = Bytes::from_static(b"all shared records expired");
+
+    let mut first_meta = make_meta("image/png");
+    first_meta.expires_at = Some(now - 200);
+    let first_id = s.put(content.clone(), first_meta).await.unwrap();
+
+    let mut second_meta = make_meta("image/png");
+    second_meta.expires_at = Some(now - 100);
+    let second_id = s.put(content, second_meta).await.unwrap();
+    let sha = s.get(&first_id).await.unwrap().1.sha256;
+
+    assert_eq!(s.purge_expired().await.unwrap(), 2);
+    assert!(matches!(
+        s.get(&first_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(matches!(
+        s.get(&second_id).await,
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(
+        !s.exists(&sha).await,
+        "content must be removed once no metadata record references the shared hash"
+    );
+    assert_eq!(s.find_by_hash(&sha).await, None);
+}
+
+// ── reopen & index rebuild ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn second_instance_sees_records_written_by_first() {
+    let dir = TempDir::new().unwrap();
+    let first = store(&dir);
+    let id = first
+        .put(Bytes::from_static(b"persist me"), make_meta("text/plain"))
+        .await
+        .unwrap();
+    let (_, meta) = first.get(&id).await.unwrap();
+    drop(first);
+
+    let reopened = store(&dir);
+    assert_eq!(reopened.find_by_hash(&meta.sha256).await, Some(id.clone()));
+    let (bytes, _) = reopened.get(&id).await.unwrap();
+    assert_eq!(bytes, Bytes::from_static(b"persist me"));
+}
+
+#[tokio::test]
+async fn reopen_after_index_db_loss_rebuilds_from_sidecars() {
+    let dir = TempDir::new().unwrap();
+    let first = store(&dir);
+    let id = first
+        .put(Bytes::from_static(b"rebuild me"), make_meta("text/plain"))
+        .await
+        .unwrap();
+    let (_, meta) = first.get(&id).await.unwrap();
+    drop(first);
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = dir.path().join(format!("media/index.sqlite{suffix}"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    let reopened = store(&dir);
+    let listed = reopened.list(10, 0).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(reopened.find_by_hash(&meta.sha256).await, Some(id.clone()));
+    let (bytes, _) = reopened.get(&id).await.unwrap();
+    assert_eq!(bytes, Bytes::from_static(b"rebuild me"));
+}
+
+#[tokio::test]
+async fn bounded_filtered_list_caps_page_and_preserves_total() {
+    use gemini_bridge_media_store::MetadataFilter;
+
+    let dir = TempDir::new().unwrap();
+    let s = store(&dir);
+    for index in 0..205u16 {
+        let mut metadata = make_meta("image/png");
+        metadata.prompt = Some(format!("Blue flower {index}"));
+        metadata.model = Some(if index % 2 == 0 { "pro" } else { "flash" }.into());
+        metadata.created_at = index as i64;
+        s.put(Bytes::from(index.to_le_bytes().to_vec()), metadata)
+            .await
+            .unwrap();
+    }
+
+    let page = s
+        .list_filtered(
+            MetadataFilter {
+                prompt_contains: Some("BLUE FLOWER".into()),
+                model: Some("pro".into()),
+                created_at_from: Some(20),
+                created_at_to: Some(200),
+            },
+            usize::MAX,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.total, 91);
+    assert_eq!(page.items.len(), 91);
+    let capped = s
+        .list_filtered(
+            MetadataFilter {
+                prompt_contains: Some("BLUE FLOWER".into()),
+                ..MetadataFilter::default()
+            },
+            usize::MAX,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capped.total, 205);
+    assert_eq!(capped.items.len(), 200, "result page must be bounded");
+    assert!(capped.items.windows(2).all(|pair| {
+        pair[0].created_at > pair[1].created_at
+            || (pair[0].created_at == pair[1].created_at && pair[0].id < pair[1].id)
+    }));
+}
+
+#[tokio::test]
+async fn configured_default_expiry_applies_only_when_expiry_is_missing() {
+    let dir = TempDir::new().unwrap();
+    let s = LocalMediaStore::new(dir.path()).with_default_ttl_days(2);
+
+    let mut metadata = make_meta("text/plain");
+    metadata.created_at = 1_000;
+    let id = s
+        .put(Bytes::from_static(b"default expiry"), metadata)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get(&id).await.unwrap().1.expires_at,
+        Some(1_000 + 2 * 86_400)
+    );
+
+    let mut explicit = make_meta("text/plain");
+    explicit.created_at = 2_000;
+    explicit.expires_at = Some(9_999);
+    let id = s
+        .put(Bytes::from_static(b"explicit expiry"), explicit)
+        .await
+        .unwrap();
+    assert_eq!(s.get(&id).await.unwrap().1.expires_at, Some(9_999));
+}
+
+#[tokio::test]
+async fn corrupted_index_is_rebuilt_from_metadata_sidecars() {
+    let dir = TempDir::new().unwrap();
+    let first = store(&dir);
+    let id = first
+        .put(
+            Bytes::from_static(b"recover after corruption"),
+            make_meta("text/plain"),
+        )
+        .await
+        .unwrap();
+    let (_, metadata) = first.get(&id).await.unwrap();
+    drop(first);
+
+    std::fs::write(
+        dir.path().join("media").join("index.sqlite"),
+        b"not a sqlite database",
+    )
+    .unwrap();
+
+    let reopened = store(&dir);
+    assert_eq!(
+        reopened.find_by_hash(&metadata.sha256).await,
+        Some(id.clone())
+    );
+    assert_eq!(reopened.list(10, 0).await.len(), 1);
+    assert_eq!(
+        reopened.get(&id).await.unwrap().0,
+        Bytes::from_static(b"recover after corruption")
+    );
 }

@@ -21,11 +21,15 @@ pub fn now_unix() -> i64 {
 
 /// Compute an `expires_at` timestamp from `created_at` + `ttl_days`.
 /// Returns `None` if `ttl_days == 0`.
+///
+/// The addition saturates at `i64::MAX`/`i64::MIN` instead of overflowing, so
+/// extreme TTL values degrade into "never expires" rather than corrupting the
+/// stored timestamp.
 pub fn compute_default_expiry(created_at: i64, ttl_days: u32) -> Option<i64> {
     if ttl_days == 0 {
         None
     } else {
-        Some(created_at + (ttl_days as i64 * 86400))
+        Some(created_at.saturating_add(ttl_days as i64 * 86_400))
     }
 }
 
@@ -71,5 +75,13 @@ mod tests {
     fn compute_default_expiry_behavior() {
         assert_eq!(compute_default_expiry(1000, 0), None);
         assert_eq!(compute_default_expiry(1000, 30), Some(1000 + 30 * 86400));
+    }
+    #[test]
+    fn compute_default_expiry_saturates_at_timestamp_limit() {
+        assert_eq!(compute_default_expiry(i64::MAX - 10, 1), Some(i64::MAX));
+        assert_eq!(
+            compute_default_expiry(0, u32::MAX),
+            Some(u32::MAX as i64 * 86400)
+        );
     }
 }
