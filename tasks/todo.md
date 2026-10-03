@@ -297,8 +297,9 @@
 - [x] **R.4.4 Regression and coverage suites** — CLI login/doctor, migrations, conversation/media concurrency, error-map, mid-stream errors, CORS, non-loopback bind, metrics cardinality, request-ID, audit log, image `n>1`/no-image, purge reference-count, reload-error, push retry.
   - Verify: full workspace suite (existing + new) passes.
   - Files: `tests/*`, `crates/*/tests/*`.
-- [ ] **R.4.5 Live/KPI external evidence** — opt-in live upstream suites (chat/image/tool) and reproducible KPI/load/soak tooling are documented. Deterministic mock/tooling checks may be completed locally; current live compatibility, measured KPIs, and seven-day success remain external until observed.
+- [ ] **R.4.5 Live/KPI external evidence** — opt-in live upstream suites (chat/image/tool) and reproducible KPI/load/soak tooling are documented. A successful operator-reported `doctor` run was received on 2026-10-03 (`Session status: Valid`; `bl`, `SNlM0e`, and `f.sid` present). This proves a live bootstrap at that time only; live chat/image/tool suites, measured target KPIs, and seven-day success remain unverified.
   - Verify: tooling runs against local mocks; live runs require operator credentials and retained results. A successful command start is not completion evidence.
+  - Current blocker: the stored session subsequently failed bootstrap with missing `SNlM0e`; all three CamoFox profiles inspected have zero cookies. Live suites await a fresh operator-authenticated session. KPI, Docker runtime build/smoke, seven-day soak, and human review remain open.
   - Files: `scripts/live/*` (opt-in), `scripts/bench/*`, `docs/operations.md`.
 
 ### Remediation checkpoints
