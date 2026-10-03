@@ -4,6 +4,8 @@ port = 8090
 # api_key = "replace-with-a-long-random-value"
 cors_enabled = false
 metrics_enabled = false
+# Defaults to a 60-request burst refilled at 60 requests per minute.
+# Override with [server.rate_limit] capacity/refill_tokens/refill_interval_secs.
 
 [storage]
 # Defaults to $XDG_DATA_HOME/gemini-bridge or ~/.local/share/gemini-bridge.

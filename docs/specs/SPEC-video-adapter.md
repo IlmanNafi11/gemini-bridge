@@ -1,70 +1,58 @@
 # Module Specification: `video-adapter`
 
-**Module ID:** `video-adapter`  
-**Crate:** `gemini-bridge-adapter-video` (`crates/video-adapter`)  
-**Phase:** Fase 3 (Experimental)  
-**Depends On:** `gemini-adapter` (generation and capability detection), `media-store` (content-addressed caching of supported results). Feature enablement is read from `config` at runtime composition.
+**Module ID:** `video-adapter`
+**Crate:** `gemini-bridge-adapter-video` (`crates/video-adapter`)
+**Phase:** Fase 3 (contract-only; production generation not shipped)
+**Depends On:** `gemini-adapter` and `media-store` are intended future implementation boundaries; no production adapter is wired. `config` rejects `video.enabled = true`.
 **Parent Spec:** `SPEC.md` §2.1; PRD §2.2 US-9, §4.9
-**Status:** Approved Draft — enriched for P.7
+**Status:** Contract reference only; no shipped production video-generation path
 
 ---
 
 ## 1. Objective & Responsibility
 
-The `video-adapter` module provides an experimental, opt-in adapter for Gemini Web video generation, exposed through an OpenAI-shaped generation request/response contract. It is registered as a plugin but **disabled by default**. If the adapter is disabled or the active upstream/account does not support the requested video pipeline, the service returns a clear `501 Not Implemented` response with an actionable reason rather than an unhandled `500 Internal Server Error`. If supported, generated video content is retrieved and cached locally, then returned via a bridge-proxied URL or base64 using the exact same response shape as image generation.
+This document records the shape reserved for a possible future Gemini Web video-generation adapter. Production video generation is **not shipped**: the application binary does not wire a production adapter, and setting `[video].enabled = true` is rejected during configuration loading. The registered video HTTP routes are contract-only and return HTTP 501; they do not dispatch generation or retrieve video media.
 
-**In scope:**
-- `POST /v1/videos/generations` request and response models with `prompt`, optional duration/format parameters, and URL/base64 result entries.
-- Experimental plugin registration controlled by an explicit configuration flag that defaults to `false`.
-- Dispatch to Gemini Web through the `gemini-adapter` boundary.
-- Explicit disabled/unavailable capability error mapping to HTTP `501 Not Implemented`.
-- Extraction of supported upstream video result URL(s), secure retrieval, content-addressed caching via `media-store` (with MIME types such as `video/mp4`), and stable local URL or `b64_json` output.
-- When supported, response object semantics fully compatible with image generation's `{created, data:[{url | b64_json}]}` pattern.
+**Contract-only scope:**
+- Preserve the planned request/response and error shapes for future review; they are not a promise of currently usable generation.
+- Keep `POST /v1/videos/generations` and `GET /v1/videos/{id}` registered under the same configured API-key policy as other `/v1/*` routes, returning JSON 501 while production service wiring is absent.
+- Reject the unsupported `video.enabled = true` configuration rather than silently accepting a no-op flag.
 
-**Out of scope:**
-- Audio generation, audio transcription, TTS, speech capabilities, or audio/video combined generation (explicitly excluded).
-- Video editing, extension, frame extraction, or transformations.
-- Background polling workers or async job-management APIs.
-- Upstream wire protocol details, which remain in `gemini-adapter`.
-- General media cache deduplication/TTL policy (→ `media-store`).
-- HTTP server startup, general auth policy, or middleware (→ `http-server`, `middleware`).
+**Not shipped:**
+- Video generation, capability detection against Gemini, video URL extraction/retrieval/caching, and video retrieval by ID.
+- Video plugin registration or runtime enablement.
+
+Audio/TTS, video editing, transformations, background polling/job management, and general HTTP/server lifecycle remain outside this contract.
 
 ---
 
-## 2. Public API & Interfaces
+## 2. Reserved API Shapes
+
+The models and errors below describe a potential future contract only. They do not imply that the current binary generates video or that `VideoConfig.enabled` is an accepted production switch.
 
 ### 2.1 Request and Response Models
 
 ```rust
 use serde::{Deserialize, Serialize};
 
-/// Request body for `POST /v1/videos/generations`.
+/// Reserved request body for `POST /v1/videos/generations`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoGenerationRequest {
-    /// Text description of the video to generate (required, non-empty after trimming).
     pub prompt: String,
-    /// Optional requested duration in seconds (must be 1..=60 if provided).
     pub duration_seconds: Option<u32>,
-    /// Output format: "url" (default) or "b64_json". Other values return HTTP 400.
     pub response_format: Option<String>,
 }
 
-/// OpenAI-shaped response returned after generation completes (matches image generation schema).
+/// Reserved OpenAI-shaped response; no production generator returns this today.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoGenerationResponse {
-    /// Unix timestamp of result creation.
     pub created: i64,
-    /// Generated video results.
     pub data: Vec<VideoResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoResult {
-    /// Bridge-proxied local retrieval URL (`/v1/videos/{id}`), when response_format = "url".
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Base64-encoded cached video bytes, when response_format = "b64_json".
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
 }
 ```
@@ -78,146 +66,67 @@ use thiserror::Error;
 pub enum VideoError {
     #[error("Video generation is disabled in bridge configuration")]
     Disabled,
-
     #[error("Video generation capability is not available upstream for this account")]
     NotImplemented,
-
     #[error("Invalid video generation request: {0}")]
     Validation(String),
-
     #[error("Video generation failed upstream: {0}")]
     UpstreamFailure(String),
-
     #[error("Video retrieval or caching failed: {0}")]
     MediaError(String),
 }
 
-/// `VideoError::Disabled` and `NotImplemented` map to HTTP 501.
-/// Validation maps to 400; transient upstream failures map to the normal upstream
-/// error mapping contract, never a panic or unhandled 500.
+/// Reserved future mapping; the current unconfigured route returns `Disabled` / HTTP 501.
 pub fn error_status(error: &VideoError) -> http::StatusCode;
 ```
 
-### 2.3 Adapter Trait and Configuration
+### 2.3 Reserved Adapter and Configuration Shapes
 
-```rust
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait VideoAdapter: Send + Sync {
-    /// Generate a video using the Gemini adapter, retrieve/cache bytes in media-store,
-    /// and return a stable URL or b64_json according to the requested response format.
-    async fn generate_video(
-        &self,
-        req: VideoGenerationRequest,
-    ) -> Result<VideoGenerationResponse, VideoError>;
-}
-
-/// Configuration section for experimental video generation.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct VideoConfig {
-    /// Experimental video generation is opt-in and disabled by default.
-    #[serde(default)]
-    pub enabled: bool,
-}
-```
+The trait and config types below are design references, not wired production APIs. In the current binary, video configuration is parsed for compatibility but `enabled = true` is rejected during validation.
 
 ---
 
 ## 3. Route Contract
 
-| Method | Path | Auth | Description |
+| Method | Path | Auth | Current behavior |
 |---|---|---|---|
-| `POST` | `/v1/videos/generations` | Same API-key policy as `/v1/images/generations` | Generate video or return `501 Not Implemented` if disabled/unavailable |
-| `GET` | `/v1/videos/{id}` | Same API-key policy as image retrieval | Retrieve cached video bytes with correct MIME type (e.g. `video/mp4`) |
+| `POST` | `/v1/videos/generations` | Same API-key policy as other public API routes | Registered contract-only route; JSON HTTP 501 (`disabled`) because no production service is wired |
+| `GET` | `/v1/videos/{id}` | Same API-key policy as other public API routes | Registered contract-only route; JSON HTTP 501 (`disabled`) because no production service is wired |
 
-When video generation is disabled, the generation endpoint remains registered and returns an OpenAI-style JSON error envelope with status 501 and a clear error code/message. The API does not become an unrecognized-path 404. Existing server auth policy applies equally to the route regardless of capability enablement.
+The route registration reserves paths and a stable disabled error only. It neither calls Gemini nor reads/writes video media. `[video].enabled = true` is a configuration error, not an opt-in path.
 
 ---
 
 ## 4. Behavior & Invariants
 
-1. **Off-by-Default Plugin Registration:**
-   - `VideoConfig.enabled` defaults to `false` when omitted from `bridge.toml` or configuration profiles.
-   - The plugin may be registered in the static registry but must not issue upstream requests while disabled.
-   - The endpoint reports an explicit, stable 501 disabled response.
-
-2. **Explicit Unavailable Capability Mapping:**
-   - If the Gemini adapter reports no upstream video support, unsupported account tier, or unavailable generation pipeline, map to `VideoError::NotImplemented` and HTTP 501.
-   - Missing capability is not a server fault; it must never become generic HTTP 500.
-   - Error JSON is actionable and distinguishes `disabled` from `not_implemented`.
-
-3. **Request Validation:**
-   - Empty `prompt` (after whitespace trimming) → HTTP 400 / `VideoError::Validation`.
-   - `duration_seconds` outside 1..=60 → HTTP 400 / `VideoError::Validation`.
-   - `response_format` other than `"url"` or `"b64_json"` → HTTP 400 / `VideoError::Validation`.
-   - Validation failures are deterministic and do not forward the request upstream.
-4. **Supported Generation Response & Media Caching:**
-   - When enabled and supported, extract the upstream result, retrieve the video bytes, and cache them through `MediaStore::put` with MIME type `video/mp4` (or `video/webm`).
-   - `response_format = "url"` returns only a stable bridge URL (`/v1/videos/{id}`).
-   - `response_format = "b64_json"` returns base64-encoded cached bytes.
-   - Exactly one of `url` or `b64_json` is populated for each result.
-
-5. **Media Retrieval:**
-   - `GET /v1/videos/{id}` retrieves content bytes from `MediaStore::get` by opaque ID and returns the stored video MIME type.
-   - Unknown IDs map to 404 through the shared API error contract.
-
-6. **No Audio/TTS Expansion:**
-   - This adapter covers video only. Audio generation, TTS, transcription, soundtracks, and audio/video combined capabilities are excluded and are not activated by the video feature flag.
-
-7. **Upstream Boundary:**
-   - Provider-specific framing and capability detection occur behind `gemini-adapter`; the video module consumes normalized adapter results and never builds `f.req` itself.
+1. The application binary does not register or instantiate a production video adapter.
+2. Video routes remain registered and return JSON HTTP 501 with code `disabled` while the service is absent.
+3. Configuration loading rejects `video.enabled = true` with an explicit unsupported-production-adapter validation error.
+4. The request/response models, future unsupported-capability mapping, URL/base64 schema, validation rules, and media-store integration below are reserved design only; they are not current executable behavior.
+5. No video generation request reaches Gemini and no video is cached/retrieved by this route.
+6. Audio/TTS remains outside scope.
 
 ---
 
-## 5. Acceptance Criteria & Traceability
+## 5. Future Design Acceptance (Not Current Release Acceptance)
 
-### US-9 Traceability (Video & Experimental Capability)
+If production video is approved and implemented later, the API may use image-like `{created, data:[{url | b64_json}]}` responses, validate prompt/duration/format, map unsupported upstream capability to 501, and cache returned bytes through `media-store`. Until that implementation and its focused tests exist, these criteria are **not complete** and no supported-generation behavior is claimed.
 
-| PRD US-9 Acceptance Criterion | Module Specification Coverage |
-|---|---|
-| Video adapter registered as experimental plugin, off-by-default | `VideoConfig.enabled` defaults to false; invariant 1 |
-| If upstream lacks support, return clear 501 not 500 | `VideoError::NotImplemented`; explicit HTTP mapping; invariant 2 |
-| If supported, return URL/base64 using same schema as image | `VideoGenerationResponse`/`VideoResult` mirrors image response; invariant 4 |
+Current deterministic contract checks are limited to: enabled config rejection; route registration/auth behavior; and disabled JSON 501 response. Live video compatibility is not established.
 
 ---
 
-## 6. Testing Strategy
+## 6. Boundaries
 
-### 6.1 Unit Tests
-- **Configuration Defaults:** Deserializing omitted `[video]` configuration yields `enabled = false`.
-- **Disabled Adapter:** Calling the route/service while disabled returns HTTP 501 with error code `disabled`; mock upstream observes no generation request.
-- **Unavailable Upstream:** Mock adapter returns unsupported capability → HTTP 501 with error code `not_implemented`, never 500.
-- **Supported Generation:** Mock adapter returns a video source; verify media bytes are cached in `media-store` and URL response contains a stable local URL.
-- **Base64 Response:** Verify `response_format = "b64_json"` yields decodable bytes identical to cached video content.
-- **Retrieval:** Cached ID returns exact bytes and video MIME type; unknown ID maps to 404.
-- **Response Shape:** URL and base64 modes each populate exactly one of `url`/`b64_json` and serialize using the image-generation-compatible `created`/`data` envelope.
-
-### 6.2 Integration Tests
-- `cargo test -p gemini-bridge-adapter-video` covers disabled, unavailable, and supported fixture cases.
-- HTTP route test verifies API authentication is applied before service access and disabled behavior is returned as JSON 501.
-- No live upstream dependency is required for deterministic tests; any real upstream acceptance is opt-in and credentials remain external to the repository.
+- **Always:** Keep production video explicitly unsupported; reject enablement; preserve the JSON 501 route contract; keep provider wire details behind `gemini-adapter` if future implementation is approved.
+- **Ask First:** Shipping video generation, enabling it in production, adding background polling/job management, or supporting combined audio/video.
+- **Never:** Claim that production video is shipped, accept an ignored `video.enabled` flag, or present reserved response models as proof of generation/retrieval behavior.
 
 ---
 
-## 7. Boundaries
+## 7. Implementation Reference
 
-- **Always:** Default to disabled; map disabled/unavailable capability to explicit HTTP 501; cache and serve supported video media through stable local IDs/URLs; preserve image-compatible response shape; keep provider wire details behind `gemini-adapter`.
-- **Ask First:** Promoting video to default-enabled, adding background polling/job management, or supporting audio/video combined generation.
-- **Never:** Return generic 500 for missing upstream capability; return raw upstream media URLs to clients; add audio/TTS scope; issue upstream generation requests while disabled.
-
----
-
-## 8. Implementation Reference
-
-- **Image Response Pattern:** `docs/specs/SPEC-image-gen.md` (OpenAI-shaped `created`/`data` URL or base64 output).
-- **Media Storage Contract:** `docs/specs/SPEC-media-store.md` (content-addressed caching and retrieval).
-- **Adapter Boundary:** `docs/specs/SPEC-gemini-adapter.md` (provider-specific wire protocol ownership).
-- **Configuration Contract:** `docs/specs/SPEC-config.md` (TOML sections, typed config, defaults).
-- **Task Implementation:** Task 3.2 (`crates/video-adapter/src/lib.rs`, `handler.rs`, configuration model, `tests/video_test.rs`).
-
----
-
-## 9. Audio/TTS Scope Confirmation
-
-This module specification is limited to video generation only. In accordance with PRD §2.3 and SPEC.md §10.8, audio generation, speech, and TTS capabilities are explicitly excluded from this repository's roadmap. No audio routes, parameters, data models, or feature flags are introduced.
+- **Configuration Contract:** `docs/specs/SPEC-config.md` and `crates/config/src/loader.rs` reject `video.enabled = true`.
+- **Current Route:** `crates/http-server/src/handlers/videos.rs` emits JSON 501 while no service is wired.
+- **Current production wiring:** `src/main.rs` does not construct a production video service.
+- **Task:** Task 3.2 is re-scoped as deterministic disabled-route/configuration contract coverage, not video-generation implementation.

@@ -34,13 +34,13 @@ Per `agent-skills:spec-driven-development` preparation, the system is decomposed
 |---|---|---|---|---|
 | `plugin-context` | `gemini-bridge-plugin-context` | DI container, typed event bus (`emit`, `waterfall`, `serial`, `parallel`, `bail`), plugin registry, lifecycle disposers | — | Fase 0 |
 | `config` | `gemini-bridge-config` | TOML parsing (`bridge.toml`), profile overlay (`dev`, `prod`, `lowmem`), environment variable overrides | — | Fase 0 |
-| `transport` | `gemini-bridge-transport` | HTTP client with TLS/JA3 fingerprint impersonation (Chrome/Firefox), proxy support (HTTP/SOCKS5), retry policy | `config` | Fase 0 |
+| `transport` | `gemini-bridge-transport` | HTTP client with browser-style header presets, proxy support (HTTP/SOCKS5), and retry policy; no TLS ClientHello/JA3 impersonation | `config` | Fase 0 |
 | `identity` | `gemini-bridge-identity` | Session bootstrap (`/app`), extraction of `bl`, `SNlM0e`, `f.sid`, automatic `__Secure-1PSIDTS` rotation, cookie storage (0600 mode, optional at-rest encryption via `BRIDGE_SECRET`) | `transport`, `config` | Fase 0 |
 | `gemini-adapter` | `gemini-bridge-adapter-gemini` | Upstream wire protocol: `f.req` positional serialization, `StreamGenerate` client, newline-framed response parsing, prefix-diff engine, externalized `schema/gemini-web.toml` index map | `llm-service`, `identity`, `transport`, `config` | Fase 0 |
 | `llm-service` | `gemini-bridge-llm-service` | Neutral LLM traits, streaming/non-streaming abstraction, provider-agnostic request/response data structures | `plugin-context` | Fase 0 |
 | `openai-compat` | `gemini-bridge-openai-compat` | OpenAI REST API schema mapping (`/v1/chat/completions`, `/v1/models`), request normalization to immutable context objects | `llm-service` | Fase 0 |
 | `http-server` | `gemini-bridge-http-server` | Axum 0.8 / Hyper 1.x server, routing, SSE streaming pipelines, CORS, bearer authentication | `openai-compat`, `config` | Fase 0 |
-| `media-store` | `gemini-bridge-media-store` | Content-addressed local media storage (SHA-256), filesystem caching, cleanup/TTL, metadata management | `config` | Fase 1 |
+| `media-store` | `gemini-bridge-media-store` | Content-addressed local media storage (SHA-256), expiry metadata, manual purge, and metadata management | `config` | Fase 1 |
 | `upload` | `gemini-bridge-upload` | Resumable push uploads to `content-push.googleapis.com`, MIME sniffing, SSRF validation, content-hash deduplication, `fileRef` acquisition | `identity`, `transport`, `config` | Fase 1 |
 | `image-gen` | `gemini-bridge-image-gen` | `/v1/images/generations` handler, image URL extraction from response tree, local proxying/caching, format transformation (`url`/`b64_json`) | `gemini-adapter`, `upload`, `media-store` | Fase 1 |
 | `health-admin` | `gemini-bridge-health-admin` | `/healthz`, `/readyz`, `/admin/status`, guided `/admin/reauth`, in-memory reload, 405 build label auto-recovery | `http-server`, `identity` | Fase 1 |
@@ -49,7 +49,7 @@ Per `agent-skills:spec-driven-development` preparation, the system is decomposed
 | `tool-calling` | `gemini-bridge-tool-calling` | OpenAI `tools[]` schema injection into prompt, structured JSON output parser, malformed call validator, tool execution feedback loop | `openai-compat`, `llm-service` | Fase 2 |
 | `gallery` | `gemini-bridge-gallery` | `/gallery` endpoint (JSON) + embedded static HTML UI (`include_str!`), thumbnail generation, media filter/deletion | `media-store`, `http-server` | Fase 2 |
 | `code-exec-surface` | `gemini-bridge-code-exec` | Extraction of `code_execution` (stdout/stderr) and grounding citations into non-intrusive `gemini_metadata` response extension | `gemini-adapter` | Fase 3 |
-| `video-adapter` | `gemini-bridge-adapter-video` | Experimental video generation adapter (off-by-default, explicit 501 fallback) | `gemini-adapter`, `media-store` | Fase 3 |
+| `video-adapter` | `gemini-bridge-adapter-video` | Deterministic request/error contract for an unshipped video capability; production exposes only the disabled 501 route and rejects enablement | `gemini-adapter`, `media-store` | Fase 3 |
 
 ### 2.2 Dependency Direction & Build Order
 
@@ -125,7 +125,7 @@ The graph shows the direct dependencies declared in the capability map; runtime 
 | **Language** | Rust (Edition 2024, stable) | Zero GC pauses, minimal memory footprint, single static binary |
 | **Async Runtime** | `tokio 1.x` (multi-threaded) | Industry standard, robust timers, async I/O |
 | **HTTP Server** | `axum 0.8` / `hyper 1.x`, `tower`, `tower-http` | Fast, type-safe routing, native SSE (`axum::response::Sse`) |
-| **HTTP Client & TLS** | `reqwest` + `rustls` (with JA3 fingerprint support via `boring` / custom TLS config) | Required to prevent upstream Google bot flagging and JA3 fingerprint blocks |
+| **HTTP Client & TLS** | `reqwest` + `rustls` | Standard certificate-verified TLS. Named browser profiles select coherent HTTP header presets only; they do not impersonate JA3 or control the TLS ClientHello. |
 | **Serialization** | `serde`, `serde_json`, `toml` | Robust positional array and nested response parsing |
 | **Metadata Storage** | `rusqlite` (bundled SQLite) | Single-file embedded transactional database without external daemon |
 | **Media Storage** | Local filesystem (content-addressed SHA-256) | Zero DB bloat, easy backup, minimal memory usage |
@@ -188,7 +188,7 @@ gemini-bridge/
 ├── crates/
 │   ├── plugin-context/             # DI, typed event bus, plugin traits
 │   ├── config/                     # TOML & profile configuration loader
-│   ├── transport/                  # HTTP client with JA3 impersonation & proxy
+│   ├── transport/                  # HTTP client with header presets & proxy
 │   ├── identity/                   # Session bootstrap, cookie & token management
 │   ├── gemini-adapter/             # Wire protocol, f.req serialization, prefix-diff
 │   ├── llm-service/                # Generic LLM service abstractions
@@ -203,7 +203,7 @@ gemini-bridge/
 │   ├── tool-calling/               # Emulated function/tool calling engine
 │   ├── gallery/                    # Gallery endpoints and embedded HTML UI
 │   ├── code-exec-surface/          # Code execution stdout & citation extractor
-│   └── video-adapter/              # Experimental video generation adapter
+│   └── video-adapter/              # Contract-only video request/error model
 ├── src/
 │   └── main.rs                     # Binary entrypoint, CLI commands, plugin wiring
 ├── docs/
@@ -376,16 +376,16 @@ For explicit traceability, the following critical decisions were confirmed durin
 4. **Plugin Architecture:** Built-in static registry with trait objects and built-in instance replacement for reload (zero `unsafe` dynamic loading). Each request clones the active generation before awaiting work; `POST /admin/reload-plugin` publishes a fully initialized generation atomically via `tokio::sync::RwLock`, and the old generation's disposer runs only after its final request handle drops.
 5. **API Key Security:** Configurable via `bridge.toml` (default: optional on `127.0.0.1`, mandatory on non-localhost bindings and `/admin/*` routes).
 6. **Gallery UI:** Embedded lightweight static HTML UI served directly by binary (`include_str!`).
-7. **TLS/JA3 Fingerprinting:** Full JA3 impersonation client included in Fase 0 scope; the specific implementation must be validated against Gemini Web before closing Task 0.3.
-8. **Media Capabilities:** Video generation included as experimental (Fase 3); Audio/TTS deferred post-v2.0.
+7. **Transport Profiles:** Browser-named profiles are HTTP header presets only. The shipped client uses ordinary `reqwest`/`rustls` negotiation and makes no JA3, cipher-suite ordering, extension ordering, or ClientHello impersonation claim. Live Gemini compatibility remains an external, credentialed observation.
+8. **Media Capabilities:** Production video generation is not shipped. The disabled route contract returns HTTP 501, and `video.enabled = true` is rejected during configuration loading. Audio/TTS is also outside the shipped scope.
 9. **At-Rest Encryption:** Optional AES-GCM encryption for stored session tokens when `BRIDGE_SECRET` is supplied (fallback to OS-level `0600` file permissions).
 10. **Browser Automation:** Camofox is available in the local development environment for manual cookie extraction/testing, but is NOT a runtime dependency of the deployed binary.
 11. **Default Network Binding:** Configurable via `bridge.toml`, default `127.0.0.1:8090`.
 
 ### Open Architecture Decisions
 
-These choices are intentionally unresolved and must be settled in the relevant module specification or implementation task; the alternatives below are not commitments:
+The following evidence depends on an external environment and is intentionally not claimed by deterministic repository tests:
 
-- **TLS/JA3 implementation:** Select and validate a client implementation/profile (the stack currently lists `boring` or custom `rustls` configuration as alternatives) against an actual Gemini Web request in Task 0.3.
-- **Configuration crate:** Select `figment` or `config` when specifying the config module.
-- **Credential encryption:** Define key derivation and nonce/storage handling for the optional AES-GCM path when specifying the identity module; `BRIDGE_SECRET` alone does not settle those details.
+- **Live upstream compatibility:** A credentialed `doctor`/chat/image run must be observed against the current Gemini Web service. Header-preset tests do not prove live compatibility, and the shipped transport does not claim TLS fingerprint impersonation.
+- **Operational KPIs:** Latency, RSS, cold-start, static binary size, and seven-day stability require measurements from the stated target environment.
+- **Credential provisioning:** Live credentials and account identifiers remain operator-provided and must never be committed.
