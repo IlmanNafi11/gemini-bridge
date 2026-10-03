@@ -1,6 +1,6 @@
 [Unit]
 Description=Gemini Bridge OpenAI-compatible Gemini Web service
-Documentation=https://github.com/OWNER/gemini-bridge
+Documentation=https://github.com/IlmanNafi11/gemini-bridge
 After=network-online.target
 Wants=network-online.target
 
@@ -13,17 +13,37 @@ Environment=BRIDGE_STORAGE_DATA_DIR=/var/lib/gemini-bridge
 Environment=HOME=/var/lib/gemini-bridge
 EnvironmentFile=-/etc/gemini-bridge/environment
 WorkingDirectory=/var/lib/gemini-bridge
+UMask=0077
+StateDirectory=gemini-bridge
+StateDirectoryMode=0700
+RuntimeDirectory=gemini-bridge
+RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 NoNewPrivileges=true
+PrivateDevices=true
 PrivateTmp=true
-ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
 ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
 ReadWritePaths=/var/lib/gemini-bridge
+RemoveIPC=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

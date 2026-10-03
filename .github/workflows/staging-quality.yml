@@ -1,0 +1,131 @@
+name: Staging PR quality
+
+on:
+  pull_request:
+    branches: [staging]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Format, lint, build, tests, audit, and package smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository for committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable action, pinned toolchain below
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker and packaging checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools systemd
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build locked workspace
+        run: cargo build --locked --workspace --all-targets
+
+      - name: Run workspace unit and integration tests
+        run: cargo test --locked --workspace
+
+      - name: Audit locked dependencies
+        run: |
+          cargo install --locked --version 0.22.2 cargo-audit
+          cargo audit --deny warnings
+
+      - name: Build static musl release binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl --bin gemini-bridge
+
+      - name: Exercise static binary release smoke
+        env:
+          GEMINI_BRIDGE_SMOKE_BINARY: target/x86_64-unknown-linux-musl/release/gemini-bridge
+        run: |
+          file "$GEMINI_BRIDGE_SMOKE_BINARY"
+          test "$(stat -c '%s' "$GEMINI_BRIDGE_SMOKE_BINARY")" -le 26214400
+          cargo test --locked --release --test release_smoke_test -- --nocapture
+
+      - name: Package and verify canonical release archive
+        shell: bash
+        env:
+          VERSION: staging-${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          ./scripts/release/package.sh "$VERSION" \
+            target/x86_64-unknown-linux-musl/release/gemini-bridge
+          archive="release/gemini-bridge-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          ./scripts/release/verify-archive.sh "$archive" release/SHA256SUMS
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          tar --no-same-owner --no-same-permissions -C "$extracted" -xzf "$archive"
+          packaged_binary="$extracted/gemini-bridge-${VERSION}-x86_64-unknown-linux-musl/gemini-bridge"
+          GEMINI_BRIDGE_SMOKE_BINARY="$packaged_binary" \
+            cargo test --locked --release --test release_smoke_test -- --nocapture
+
+      - name: Verify systemd unit syntax
+        run: |
+          sudo install -m 0755 /bin/true /usr/local/bin/gemini-bridge
+          systemd-analyze verify deploy/systemd/gemini-bridge.service
+
+      - name: Build and run hardened container smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag gemini-bridge:ci .
+          volume=gemini-bridge-ci-data
+          cid=
+          cleanup() {
+            [[ -z "$cid" ]] || docker logs "$cid" || true
+            [[ -z "$cid" ]] || docker rm --force "$cid" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume" >/dev/null
+          api_key=$(openssl rand -hex 32)
+          cid=$(docker run --detach --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --publish 127.0.0.1::8090 \
+            --mount type=volume,src="$volume",dst=/var/lib/gemini-bridge \
+            --cap-drop=ALL --security-opt=no-new-privileges:true \
+            --env BRIDGE_SERVER_BIND_ADDR=0.0.0.0 \
+            --env BRIDGE_SERVER_API_KEY="$api_key" \
+            gemini-bridge:ci)
+          [[ "$(docker inspect --format '{{.Config.User}}' "$cid")" == "10001:10001" ]]
+          host_port=$(docker port "$cid" 8090/tcp | sed 's/.*://')
+          for attempt in $(seq 1 60); do
+            status_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "http://127.0.0.1:$host_port/v1/models" || true)
+            if [[ "$status_code" == 401 ]] && curl --fail --silent \
+              --header "Authorization: Bearer $api_key" \
+              "http://127.0.0.1:$host_port/v1/models" >/dev/null; then
+              docker exec "$cid" test -r /usr/share/licenses/gemini-bridge/LICENSE
+              exit 0
+            fi
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid")
+            [[ "$status" != unhealthy ]] || { echo "container healthcheck reported unhealthy" >&2; exit 1; }
+            sleep 2
+          done
+          echo "container was not externally reachable within 120 seconds" >&2
+          exit 1

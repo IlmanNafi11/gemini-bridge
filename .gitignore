@@ -4,6 +4,11 @@
 .env
 .env.*
 !.env.example
+__pycache__/
+*.pyc
+bridge.toml
 *.log
 *.sha256
 release/
+!/scripts/release/
+!/scripts/release/*.sh

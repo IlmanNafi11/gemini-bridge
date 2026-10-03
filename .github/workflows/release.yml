@@ -5,59 +5,335 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Dry-run artifact label (for example v0.1.0-rc1); release tags must match Cargo.toml"
+        default: manual
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: 1.97.1
+  TARGET: x86_64-unknown-linux-musl
 
 jobs:
-  release:
-    name: Build and publish Linux release
-    runs-on: ubuntu-latest
+  verify:
+    name: Quality and locked workspace verification
+    runs-on: ubuntu-24.04
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          targets: x86_64-unknown-linux-musl
+          fetch-depth: 0
+
+      - name: Scan repository for committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Select and validate release version
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version=$GITHUB_REF_NAME
+            cargo_version=$(awk -F ' *= *' '/^\[workspace.package\]$/ { in_package=1; next } /^\[/ { in_package=0 } in_package && $1 == "version" { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)
+            [[ -n "$cargo_version" && "$version" == "v$cargo_version" ]] || {
+              echo "error: release tag $version does not match Cargo package version ${cargo_version:-<missing>}" >&2
+              exit 1
+            }
+          else
+            version=${DISPATCH_VERSION:-manual}
+          fi
+          [[ "$version" =~ ^v?[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || {
+            echo "error: invalid release version label: $version" >&2
+            exit 1
+          }
+
+      - name: Verify tag commit is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "error: release tag must point to a commit reachable from main" >&2
+            exit 1
+          }
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable action
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build locked workspace
+        run: cargo build --locked --workspace --all-targets
+
+      - name: Run workspace unit and integration tests
+        run: cargo test --locked --workspace
+
+      - name: Audit locked dependencies
+        run: |
+          cargo install --locked --version 0.22.2 cargo-audit
+          cargo audit --deny warnings
+
+  container-and-systemd:
+    name: Container and systemd verification
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Verify systemd unit syntax
+        run: |
+          sudo install -m 0755 /bin/true /usr/local/bin/gemini-bridge
+          systemd-analyze verify deploy/systemd/gemini-bridge.service
+
+      - name: Build pinned container image
+        run: docker build --pull --tag gemini-bridge:release-check .
+
+      - name: Run hardened container health smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          volume=gemini-bridge-release-data
+          cid=
+          cleanup() {
+            [[ -z "$cid" ]] || docker logs "$cid" || true
+            [[ -z "$cid" ]] || docker rm --force "$cid" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume" >/dev/null
+          api_key=$(openssl rand -hex 32)
+          cid=$(docker run --detach --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --publish 127.0.0.1::8090 \
+            --mount type=volume,src="$volume",dst=/var/lib/gemini-bridge \
+            --cap-drop=ALL --security-opt=no-new-privileges:true \
+            --env BRIDGE_SERVER_BIND_ADDR=0.0.0.0 \
+            --env BRIDGE_SERVER_API_KEY="$api_key" \
+            gemini-bridge:release-check)
+          [[ "$(docker inspect --format '{{.Config.User}}' "$cid")" == "10001:10001" ]]
+          host_port=$(docker port "$cid" 8090/tcp | sed 's/.*://')
+          for attempt in $(seq 1 60); do
+            status_code=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              "http://127.0.0.1:$host_port/v1/models" || true)
+            if [[ "$status_code" == 401 ]] && curl --fail --silent \
+              --header "Authorization: Bearer $api_key" \
+              "http://127.0.0.1:$host_port/v1/models" >/dev/null; then
+              docker exec "$cid" test -r /usr/share/licenses/gemini-bridge/LICENSE
+              exit 0
+            fi
+            status=$(docker inspect --format '{{.State.Health.Status}}' "$cid")
+            [[ "$status" != unhealthy ]] || { echo "container healthcheck reported unhealthy" >&2; exit 1; }
+            sleep 2
+          done
+          echo "container was not externally reachable within 120 seconds" >&2
+          exit 1
+
+  build-artifact:
+    name: Build and verify static release artifact
+    needs: verify
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact_name }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable action
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.TARGET }}
 
       - name: Install musl linker
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+
+      - name: Select artifact version
+        id: meta
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version=$GITHUB_REF_NAME
+          else
+            version=${DISPATCH_VERSION:-manual}
+          fi
+          [[ "$version" =~ ^v?[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] || {
+            echo "error: invalid release version label: $version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=gemini-bridge-$version-$TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Build static release binary
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl --bin gemini-bridge
+        run: cargo build --locked --release --target "$TARGET" --bin gemini-bridge
 
-      - name: Verify release artifact
+      - name: Verify static binary and size gate
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/x86_64-unknown-linux-musl/release/gemini-bridge"
-          file "$binary"
-          test "$(stat -c '%s' "$binary")" -le 26214400
-          if command -v strip >/dev/null 2>&1; then strip "$binary"; fi
+          binary="target/$TARGET/release/gemini-bridge"
+          file "$binary" | tee binary-file.txt
+          file "$binary" | grep -qE 'statically linked|static-pie linked'
           size=$(stat -c '%s' "$binary")
-          echo "stripped binary size: ${size} bytes"
+          echo "binary size: $size bytes"
           test "$size" -le 26214400
 
-      - name: Package release
+      - name: Exercise static binary release smoke
+        env:
+          GEMINI_BRIDGE_SMOKE_BINARY: target/x86_64-unknown-linux-musl/release/gemini-bridge
+        run: cargo test --locked --release --test release_smoke_test -- --nocapture
+
+      - name: Package canonical release archive
         shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME:-manual}"
-          staging="release/gemini-bridge-${version}-x86_64-unknown-linux-musl"
-          mkdir -p "$staging"
-          cp target/x86_64-unknown-linux-musl/release/gemini-bridge "$staging/"
-          cp README.md bridge.example.toml "$staging/"
-          cp -r docs "$staging/"
-          tar -C release -czf "${staging}.tar.gz" "$(basename "$staging")"
-          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          ./scripts/release/package.sh "$VERSION" \
+            "target/$TARGET/release/gemini-bridge"
+          ./scripts/release/verify-archive.sh \
+            "release/gemini-bridge-$VERSION-$TARGET.tar.gz" \
+            release/SHA256SUMS
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Exercise extracted packaged binary
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          archive="release/gemini-bridge-${VERSION}-${TARGET}.tar.gz"
+          tar --no-same-owner --no-same-permissions -C "$extracted" -xzf "$archive"
+          packaged_binary="$extracted/gemini-bridge-${VERSION}-${TARGET}/gemini-bridge"
+          GEMINI_BRIDGE_SMOKE_BINARY="$packaged_binary" \
+            cargo test --locked --release --test release_smoke_test -- --nocapture
+
+      - name: Generate CycloneDX and SPDX SBOMs
+        run: |
+          cargo install --locked --version 0.10.0 cargo-sbom
+          ./scripts/release/sbom.sh release \
+            "release/${{ steps.meta.outputs.artifact_name }}.tar.gz"
+          ./scripts/release/verify-archive.sh \
+            "release/${{ steps.meta.outputs.artifact_name }}.tar.gz" \
+            release/SHA256SUMS
+
+      - name: Upload verified release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          generate_release_notes: true
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            release/${{ steps.meta.outputs.artifact_name }}.tar.gz
+            release/SHA256SUMS
+            release/sbom.cdx.json
+            release/sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    name: Attest verified artifact and SBOMs
+    needs: [container-and-systemd, build-artifact]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download verified release payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-artifact.outputs.artifact-name }}
+          path: release
+      - name: Verify payload checksums before attestation
+        run: |
+          ./scripts/release/verify-archive.sh \
+            "release/${{ needs.build-artifact.outputs.artifact-name }}.tar.gz" \
+            release/SHA256SUMS
+
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+
+      - name: Attest CycloneDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release/${{ needs.build-artifact.outputs.artifact-name }}.tar.gz
+          sbom-path: release/sbom.cdx.json
+
+      - name: Attest SPDX SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: release/${{ needs.build-artifact.outputs.artifact-name }}.tar.gz
+          sbom-path: release/sbom.spdx.json
+
+      - name: Upload provenance-verified payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: attested-${{ needs.build-artifact.outputs.artifact-name }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [attest, build-artifact]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download attested payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: attested-${{ needs.build-artifact.outputs.artifact-name }}
+          path: release
+      - name: Verify payload checksums before publication
+        run: |
+          ./scripts/release/verify-archive.sh \
+            "release/${{ needs.build-artifact.outputs.artifact-name }}.tar.gz" \
+            release/SHA256SUMS
+
+      - name: Publish GitHub release payload
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          body_path: .github/RELEASE_BODY.md
+          generate_release_notes: false
+          fail_on_unmatched_files: true
           files: |
-            release/*.tar.gz
-            release/*.sha256
+            release/${{ needs.build-artifact.outputs.artifact-name }}.tar.gz
+            release/SHA256SUMS
+            release/sbom.cdx.json
+            release/sbom.spdx.json

@@ -17,11 +17,12 @@ use gemini_bridge_llm_service::{
 };
 use gemini_bridge_media_store::LocalMediaStore;
 use gemini_bridge_upload::push_client::PushUploadClient;
-use gemini_bridge_upload::{UploadError, UploadLimits, UploadServiceImpl};
+use gemini_bridge_upload::{
+    MediaDownloader, MediaKind, UploadError, UploadLimits, UploadServiceImpl,
+};
+use reqwest::Url;
 use serde_json::json;
 use tokio::task::JoinHandle;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\ngenerated image content";
 
@@ -39,6 +40,28 @@ impl PushUploadClient for NoopPush {
 
     async fn upload_bytes(&self, _session_url: &str, _bytes: Bytes) -> Result<String, UploadError> {
         Ok("files/reference-1".to_owned())
+    }
+}
+
+struct FixedImageDownloader;
+
+#[async_trait]
+impl MediaDownloader for FixedImageDownloader {
+    async fn download(&self, _url: &Url, kind: MediaKind) -> Result<Bytes, UploadError> {
+        assert_eq!(kind, MediaKind::Image);
+        Ok(Bytes::from_static(PNG))
+    }
+}
+
+struct UrlTaggedImageDownloader;
+
+#[async_trait]
+impl MediaDownloader for UrlTaggedImageDownloader {
+    async fn download(&self, url: &Url, kind: MediaKind) -> Result<Bytes, UploadError> {
+        assert_eq!(kind, MediaKind::Image);
+        let mut bytes = PNG.to_vec();
+        bytes.extend_from_slice(url.path().as_bytes());
+        Ok(Bytes::from(bytes))
     }
 }
 
@@ -100,20 +123,11 @@ async fn spawn_server(router: axum::Router, port: u16) -> JoinHandle<()> {
 
 #[tokio::test]
 async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
-    let image_origin = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/generated/googleusercontent.com/image.png"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(PNG))
-        .mount(&image_origin)
-        .await;
-
     let adapter = Arc::new(ImageAdapter {
-        image_url: format!(
-            "{}/generated/googleusercontent.com/image.png",
-            image_origin.uri()
-        ),
+        image_url: "https://lh3.googleusercontent.com/generated/image.png".to_owned(),
         last_request: Mutex::new(None),
     });
+
     let temp = tempfile::TempDir::new().unwrap();
     let store = LocalMediaStore::new(temp.path());
     let upload = Arc::new(UploadServiceImpl::new(
@@ -121,12 +135,14 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
         Arc::new(NoopPush),
         UploadLimits::default(),
     ));
-    let image_service: Arc<dyn ImageGenService> = Arc::new(DefaultImageGenService::new(
-        adapter.clone(),
-        store,
-        upload.clone(),
-        "gemini-web-flash",
-    ));
+    let image_service: Arc<dyn ImageGenService> =
+        Arc::new(DefaultImageGenService::with_downloader(
+            adapter.clone(),
+            store,
+            upload.clone(),
+            "gemini-web-flash",
+            Arc::new(FixedImageDownloader),
+        ));
 
     let port = free_port();
     let router = build_router(
@@ -144,6 +160,7 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
             image_service: Some(image_service),
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
@@ -186,18 +203,8 @@ async fn generated_image_is_cached_and_retrievable_by_proxy_url() {
 
 #[tokio::test]
 async fn b64_response_decodes_to_generated_image_bytes() {
-    let image_origin = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/generated/googleusercontent.com/image.png"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(PNG))
-        .mount(&image_origin)
-        .await;
-
     let adapter = Arc::new(ImageAdapter {
-        image_url: format!(
-            "{}/generated/googleusercontent.com/image.png",
-            image_origin.uri()
-        ),
+        image_url: "https://lh3.googleusercontent.com/generated/image.png".to_owned(),
         last_request: Mutex::new(None),
     });
     let temp = tempfile::TempDir::new().unwrap();
@@ -207,11 +214,12 @@ async fn b64_response_decodes_to_generated_image_bytes() {
         Arc::new(NoopPush),
         UploadLimits::default(),
     ));
-    let service: Arc<dyn ImageGenService> = Arc::new(DefaultImageGenService::new(
+    let service: Arc<dyn ImageGenService> = Arc::new(DefaultImageGenService::with_downloader(
         adapter.clone(),
         store,
         upload.clone(),
         "gemini-web-flash",
+        Arc::new(FixedImageDownloader),
     ));
     let port = free_port();
     let router = build_router(
@@ -229,6 +237,7 @@ async fn b64_response_decodes_to_generated_image_bytes() {
             image_service: Some(service),
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
@@ -252,6 +261,144 @@ async fn b64_response_decodes_to_generated_image_bytes() {
     assert!(body["data"][0].get("url").is_none());
     let encoded = body["data"][0]["b64_json"].as_str().unwrap();
     assert_eq!(B64.decode(encoded).unwrap(), PNG);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn n_two_returns_two_generated_images_over_http() {
+    let adapter = Arc::new(ImageAdapter {
+        image_url: concat!(
+            "https://lh3.googleusercontent.com/generated/first.png ",
+            "https://lh3.googleusercontent.com/generated/second.png"
+        )
+        .to_owned(),
+        last_request: Mutex::new(None),
+    });
+    let temp = tempfile::TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let upload = Arc::new(UploadServiceImpl::new(
+        store.clone(),
+        Arc::new(NoopPush),
+        UploadLimits::default(),
+    ));
+    let service: Arc<dyn ImageGenService> = Arc::new(DefaultImageGenService::with_downloader(
+        adapter.clone(),
+        store,
+        upload.clone(),
+        "gemini-web-flash",
+        Arc::new(UrlTaggedImageDownloader),
+    ));
+    let port = free_port();
+    let router = build_router(
+        ServerConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            api_key: None,
+            require_key_for_admin: false,
+            cors_enabled: false,
+            rate_limit: None,
+            metrics_enabled: false,
+        },
+        AppState {
+            adapter,
+            upload_service: Some(upload),
+            image_service: Some(service),
+            video_service: None,
+            health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
+            conversation_store: None,
+            tool_engine: gemini_bridge_http_server::build_tool_engine(),
+            gallery_service: None,
+            media_purge: None,
+        },
+    );
+    let server = spawn_server(router, port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/images/generations"))
+        .json(&json!({"prompt": "two foxes", "n": 2}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let images = body["data"].as_array().unwrap();
+    assert_eq!(images.len(), 2);
+    assert!(images.iter().all(|image| {
+        image["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("/v1/images/"))
+    }));
+    assert_ne!(images[0]["url"], images[1]["url"]);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn response_without_an_image_maps_to_exact_http_error() {
+    let adapter = Arc::new(ImageAdapter {
+        image_url: "the provider returned text only".to_owned(),
+        last_request: Mutex::new(None),
+    });
+    let temp = tempfile::TempDir::new().unwrap();
+    let store = LocalMediaStore::new(temp.path());
+    let upload = Arc::new(UploadServiceImpl::new(
+        store.clone(),
+        Arc::new(NoopPush),
+        UploadLimits::default(),
+    ));
+    let service: Arc<dyn ImageGenService> = Arc::new(DefaultImageGenService::with_downloader(
+        adapter.clone(),
+        store,
+        upload.clone(),
+        "gemini-web-flash",
+        Arc::new(FixedImageDownloader),
+    ));
+    let port = free_port();
+    let router = build_router(
+        ServerConfig {
+            bind_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            api_key: None,
+            require_key_for_admin: false,
+            cors_enabled: false,
+            rate_limit: None,
+            metrics_enabled: false,
+        },
+        AppState {
+            adapter,
+            upload_service: Some(upload),
+            image_service: Some(service),
+            video_service: None,
+            health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
+            conversation_store: None,
+            tool_engine: gemini_bridge_http_server::build_tool_engine(),
+            gallery_service: None,
+            media_purge: None,
+        },
+    );
+    let server = spawn_server(router, port).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/images/generations"))
+        .json(&json!({"prompt": "an impossible image"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "error": {
+                "message": "no image could be extracted from the model response",
+                "type": "image_generation_error",
+                "code": "no_image_extracted"
+            }
+        })
+    );
 
     server.abort();
 }
@@ -291,6 +438,7 @@ async fn missing_image_id_returns_not_found() {
             image_service: Some(service),
             video_service: None,
             health_admin: gemini_bridge_http_server::build_health_admin(None),
+            identity_service: None,
             conversation_store: None,
             tool_engine: gemini_bridge_http_server::build_tool_engine(),
             gallery_service: None,
