@@ -299,7 +299,7 @@
   - Files: `tests/*`, `crates/*/tests/*`.
 - [ ] **R.4.5 Live/KPI external evidence** — opt-in live upstream suites (chat/image/tool) and reproducible KPI/load/soak tooling are documented. A successful operator-reported `doctor` run was received on 2026-10-03 (`Session status: Valid`; `bl`, `SNlM0e`, and `f.sid` present). This proves a live bootstrap at that time only; live chat/image/tool suites, measured target KPIs, and seven-day success remain unverified.
   - Verify: tooling runs against local mocks; live runs require operator credentials and retained results. A successful command start is not completion evidence.
-  - Current blocker: An operator-supplied Cookie header was submitted to `auth login` through hidden stdin on 2026-10-04; validation failed with `Bootstrap response is missing required field: SNlM0e`, so the prior credential file remains unchanged. CamoFox reports an active Gemini tab, but its persisted state does not contain the three required session cookies. Live acceptance awaits a cookie header copied freshly from the authenticated browser's `/app` request. KPI, Docker runtime build/smoke, seven-day soak, and human review remain open.
+  - Root cause identified and fixed (2026-10-05): Google Gemini Web changed response schema from object-based `candidates[0].parts[0].text` to array-based `[4][0][1][0]`. Schema migration is committed in `b83d839`; adapter tests pass and extraction was verified against a live upstream response. Current blocker: session bootstrap now fails `SNlM0e` missing; live acceptance awaits a fresh session import. KPI, Docker runtime build/smoke, seven-day soak, and human review remain open.
   - Files: `scripts/live/*` (opt-in), `scripts/bench/*`, `docs/operations.md`.
 
 ### Remediation checkpoints
