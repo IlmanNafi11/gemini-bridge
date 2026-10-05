@@ -122,6 +122,51 @@ async fn non_stream_request_success_through_wiremock() {
 }
 
 #[tokio::test]
+async fn stream_generate_request_includes_anti_xsrf_at_token() {
+    // Regression guard: Gemini Web rejects StreamGenerate with HTTP 400 unless
+    // the form body carries the anti-XSRF `at` token (the `SNlM0e` bootstrap
+    // value) alongside `f.req`.
+    let server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&server).await;
+    let config = make_config(_dir.path());
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .mount(&server)
+        .await;
+
+    let observed_body = Arc::new(parking_lot::Mutex::new(String::new()));
+    let observed_body_for_response = observed_body.clone();
+    Mock::given(method("POST"))
+        .and(path(
+            "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        ))
+        .respond_with(move |request: &wiremock::Request| {
+            *observed_body_for_response.lock() =
+                String::from_utf8_lossy(&request.body).into_owned();
+            ResponseTemplate::new(200).set_body_string(FIXTURE_RESPONSE)
+        })
+        .mount(&server)
+        .await;
+
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
+    adapter.generate_non_stream(test_request()).await.unwrap();
+
+    let body = observed_body.lock();
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect();
+    assert!(form.contains_key("f.req"), "form body must carry f.req");
+    assert_eq!(
+        form.get("at").map(String::as_str),
+        Some("AIzaSyFakeTokenForTesting1234567890"),
+        "form body must carry the anti-XSRF `at` token from SNlM0e"
+    );
+}
+
+#[tokio::test]
 async fn llm_adapter_trait_implementation_streams_parsed_events() {
     let server = MockServer::start().await;
     let (identity, _dir) = make_identity(&server).await;
@@ -198,7 +243,13 @@ async fn stream_yields_complete_frames_before_upstream_finishes_and_drop_cancels
 
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!([null, [null, null], null, null, [["candidate_id", ["First frame"]]]])
+            serde_json::json!([
+                null,
+                [null, null],
+                null,
+                null,
+                [["candidate_id", ["First frame"]]]
+            ])
         );
         let split = frame.len() / 2;
         socket
@@ -282,7 +333,13 @@ async fn mid_stream_upstream_close_surfaces_error_event_not_hang() {
 
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!([null, [null, null], null, null, [["candidate_id", ["Partial"]]]])
+            serde_json::json!([
+                null,
+                [null, null],
+                null,
+                null,
+                [["candidate_id", ["Partial"]]]
+            ])
         );
         socket
             .write_all(

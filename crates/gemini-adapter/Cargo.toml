@@ -24,4 +24,5 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }
 insta = { workspace = true }
+parking_lot = { workspace = true }
 tempfile = "3"

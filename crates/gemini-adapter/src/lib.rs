@@ -181,8 +181,12 @@ impl DefaultGeminiAdapter {
         let envelope_json = serde_json::to_string(&envelope).map_err(|error| {
             GeminiAdapterError::SchemaMismatch(format!("cannot encode f.req: {error}"))
         })?;
+        // Gemini Web requires the anti-XSRF `at` token (the `SNlM0e` value from
+        // the bootstrap page) alongside `f.req`; without it upstream rejects the
+        // request with HTTP 400 (missing anti-XSRF token).
         let form_body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("f.req", &envelope_json)
+            .append_pair("at", &bootstrap.snlm0e)
             .finish();
 
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
