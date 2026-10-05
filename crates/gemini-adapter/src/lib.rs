@@ -183,6 +183,7 @@ impl DefaultGeminiAdapter {
         })?;
         let form_body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("f.req", &envelope_json)
+            .append_pair("at", &bootstrap.snlm0e)
             .finish();
 
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
