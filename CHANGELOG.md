@@ -2,6 +2,13 @@
 
 All notable user-facing changes to Gemini Bridge are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- Include Gemini Web's anti-XSRF `at` token in StreamGenerate form submissions.
+- Align integration response fixtures with the current array-based Gemini Web schema, restoring chat, metadata, streaming, and 405-recovery tests.
+
 ## [0.1.0] - 2026-10-02
 
 ### Added
