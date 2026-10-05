@@ -52,11 +52,10 @@ impl Default for GeminiWebSchema {
             conversation_id: 1,
             response_id: 2,
             candidate_text_path: vec![
-                PathSegment::Field("candidates".to_owned()),
+                PathSegment::Index(4),
                 PathSegment::Index(0),
-                PathSegment::Field("parts".to_owned()),
+                PathSegment::Index(1),
                 PathSegment::Index(0),
-                PathSegment::Field("text".to_owned()),
             ],
         }
     }

@@ -18,6 +18,7 @@ gemini-bridge-transport = { path = "../transport" }
 gemini-bridge-identity = { path = "../identity" }
 toml = "0.8"
 gemini-bridge-llm-service = { path = "../llm-service" }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

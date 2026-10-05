@@ -278,7 +278,7 @@ mod tests {
     fn frame(text: &str) -> String {
         format!(
             ")]}}'\n{}\n",
-            json!({"candidates": [{"parts": [{"text": text}]}]})
+            json!([null, null, null, null, [["candidate", [text]]]])
         )
     }
 

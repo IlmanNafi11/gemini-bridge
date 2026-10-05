@@ -1,2 +1,4 @@
 )]}'
-["wrb.fr","fake-rpc-id","[null,null,[null,null,null,null,null,[{\"candidates\":[{\"parts\":[{\"text\":\"Hello from the sanitized Gemini fixture.\"}],\"finishReason\":\"STOP\",\"candidateId\":\"fake-candidate\"}]}]]]" ]
+
+5327
+[["wrb.fr",null,"[null,[\"c_fake_conv\",\"r_fake_resp\"],null,null,[[\"rc_fake_cand\",[\"Hello from the sanitized Gemini fixture.\"],null,null,null,null,null,null,[1],\"en\"]]]"]]

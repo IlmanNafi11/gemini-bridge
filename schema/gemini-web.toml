@@ -19,9 +19,8 @@ response_id = 2
 # Elements are alternating type and value pairs:
 #   "field" followed by the field name, or "index" followed by the 0-based index.
 candidate_text_path = [
-    "field", "candidates",
+    "index", "4",
     "index", "0",
-    "field", "parts",
+    "index", "1",
     "index", "0",
-    "field", "text",
 ]

@@ -252,12 +252,17 @@ impl DefaultGeminiAdapter {
         request: &LlmRequest,
     ) -> Result<Bytes, GeminiAdapterError> {
         let transport_request = self.build_wire_transport_request(request).await?;
-        let response = self
-            .transport
-            .execute(transport_request)
-            .await
-            .map_err(|error| GeminiAdapterError::Transport(error.to_string()))?;
-        Self::check_stream_status(response.status, &response.headers)?;
+        let response = match self.transport.execute(transport_request).await {
+            Ok(res) => res,
+            Err(error) => {
+                tracing::warn!(%error, "upstream wire transport execute failed");
+                return Err(GeminiAdapterError::Transport(error.to_string()));
+            }
+        };
+        if let Err(error) = Self::check_stream_status(response.status, &response.headers) {
+            tracing::warn!(status = %response.status, %error, "upstream wire returned non-success status");
+            return Err(error);
+        }
         Ok(response.body)
     }
 
@@ -330,7 +335,13 @@ impl DefaultGeminiAdapter {
         request: &LlmRequest,
     ) -> Result<Completion, GeminiAdapterError> {
         let body = self.execute_wire_with_recovery(request).await?;
-        let text = parse_non_stream_response(&body, &self.schema)?;
+        let text = match parse_non_stream_response(&body, &self.schema) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(%error, body_len = body.len(), "upstream response parsing failed");
+                return Err(error);
+            }
+        };
         let metadata = parse_non_stream_metadata(&body);
         Ok(Completion {
             text,

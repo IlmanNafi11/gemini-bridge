@@ -198,7 +198,7 @@ async fn stream_yields_complete_frames_before_upstream_finishes_and_drop_cancels
 
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!({"candidates": [{"parts": [{"text": "First frame"}]}]})
+            serde_json::json!([null, [null, null], null, null, [["candidate_id", ["First frame"]]]])
         );
         let split = frame.len() / 2;
         socket
@@ -282,7 +282,7 @@ async fn mid_stream_upstream_close_surfaces_error_event_not_hang() {
 
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!({"candidates": [{"parts": [{"text": "Partial"}]}]})
+            serde_json::json!([null, [null, null], null, null, [["candidate_id", ["Partial"]]]])
         );
         socket
             .write_all(

@@ -18,11 +18,10 @@ fn from_toml_parses_canonical_schema_file() {
     assert_eq!(
         schema.candidate_text_path,
         vec![
-            PathSegment::Field("candidates".to_owned()),
+            PathSegment::Index(4),
             PathSegment::Index(0),
-            PathSegment::Field("parts".to_owned()),
+            PathSegment::Index(1),
             PathSegment::Index(0),
-            PathSegment::Field("text".to_owned()),
         ]
     );
 }
