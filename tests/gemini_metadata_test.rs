@@ -137,6 +137,14 @@ fn parse_sse(raw: &str) -> (Vec<String>, bool) {
     (data_lines, has_done)
 }
 
+/// Build a Gemini StreamGenerate frame in the live array-based schema, where
+/// `response[4][0][1][0]` resolves to `text`. `extra` is appended as a trailing
+/// keyed object so key-based metadata extraction still sees named fields.
+fn gemini_frame(text: &str, extra: Value) -> String {
+    let frame = json!([null, null, null, null, [["candidate", [text]]], extra]);
+    serde_json::to_string(&frame).unwrap()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -149,27 +157,26 @@ async fn non_stream_surfaces_code_execution_and_citations() {
         .mount(&mock)
         .await;
 
-    let upstream_payload = json!({
-        "candidates": [{
-            "parts": [{"text": "Here is the calculation result: 42"}],
-            "candidateId": "cand-001"
-        }],
-        "code_execution": [{
-            "language": "python",
-            "code": "result = 6 * 7\nprint(result)",
-            "output": "42\n"
-        }],
-        "citations": [{
-            "start_index": 0,
-            "end_index": 33,
-            "uri": "https://docs.python.org/3/tutorial/",
-            "title": "Python Tutorial"
-        }],
-        "conversation_id": "conv-test-123"
-    });
     let stream_body = format!(
         ")]}}'\n{}\n",
-        serde_json::to_string(&upstream_payload).unwrap()
+        gemini_frame(
+            "Here is the calculation result: 42",
+            json!({
+                "candidateId": "cand-001",
+                "code_execution": [{
+                    "language": "python",
+                    "code": "result = 6 * 7\nprint(result)",
+                    "output": "42\n"
+                }],
+                "citations": [{
+                    "start_index": 0,
+                    "end_index": 33,
+                    "uri": "https://docs.python.org/3/tutorial/",
+                    "title": "Python Tutorial"
+                }],
+                "conversation_id": "conv-test-123"
+            })
+        )
     );
 
     Mock::given(method("POST"))
@@ -238,15 +245,9 @@ async fn non_stream_omits_metadata_when_absent() {
         .mount(&mock)
         .await;
 
-    let upstream_payload = json!({
-        "candidates": [{
-            "parts": [{"text": "Plain answer without metadata"}],
-            "candidateId": "cand-002"
-        }]
-    });
     let stream_body = format!(
         ")]}}'\n{}\n",
-        serde_json::to_string(&upstream_payload).unwrap()
+        gemini_frame("Plain answer without metadata", json!({}))
     );
 
     Mock::given(method("POST"))
@@ -293,35 +294,34 @@ async fn non_stream_sanitizes_insecure_citations() {
         .mount(&mock)
         .await;
 
-    let upstream_payload = json!({
-        "candidates": [{
-            "parts": [{"text": "Citations test"}],
-            "candidateId": "cand-003"
-        }],
-        "citations": [
-            {
-                "start_index": 0,
-                "end_index": 5,
-                "uri": "http://insecure-external.com/leak",
-                "title": "Insecure"
-            },
-            {
-                "start_index": 5,
-                "end_index": 10,
-                "uri": "file:///etc/passwd",
-                "title": "Local file"
-            },
-            {
-                "start_index": 10,
-                "end_index": 14,
-                "uri": "https://secure-site.org/info",
-                "title": "Secure Site"
-            }
-        ]
-    });
     let stream_body = format!(
         ")]}}'\n{}\n",
-        serde_json::to_string(&upstream_payload).unwrap()
+        gemini_frame(
+            "Citations test",
+            json!({
+                "candidateId": "cand-003",
+                "citations": [
+                    {
+                        "start_index": 0,
+                        "end_index": 5,
+                        "uri": "http://insecure-external.com/leak",
+                        "title": "Insecure"
+                    },
+                    {
+                        "start_index": 5,
+                        "end_index": 10,
+                        "uri": "file:///etc/passwd",
+                        "title": "Local file"
+                    },
+                    {
+                        "start_index": 10,
+                        "end_index": 14,
+                        "uri": "https://secure-site.org/info",
+                        "title": "Secure Site"
+                    }
+                ]
+            })
+        )
     );
 
     Mock::given(method("POST"))
@@ -365,33 +365,25 @@ async fn streaming_attaches_metadata_only_to_final_chunk() {
         .mount(&mock)
         .await;
 
-    let frame1 = json!({
-        "candidates": [{
-            "parts": [{"text": "Hel"}]
-        }]
-    });
-    let frame2 = json!({
-        "candidates": [{
-            "parts": [{"text": "Hello world"}]
-        }],
-        "code_execution": [{
-            "language": "python",
-            "code": "print('hello')",
-            "output": "hello\n"
-        }],
-        "citations": [{
-            "start_index": 0,
-            "end_index": 11,
-            "uri": "https://example.com/hello",
-            "title": "Hello"
-        }]
-    });
-
-    let stream_body = format!(
-        ")]}}'\n{}\n{}\n",
-        serde_json::to_string(&frame1).unwrap(),
-        serde_json::to_string(&frame2).unwrap()
+    let frame1 = gemini_frame("Hel", json!({}));
+    let frame2 = gemini_frame(
+        "Hello world",
+        json!({
+            "code_execution": [{
+                "language": "python",
+                "code": "print('hello')",
+                "output": "hello\n"
+            }],
+            "citations": [{
+                "start_index": 0,
+                "end_index": 11,
+                "uri": "https://example.com/hello",
+                "title": "Hello"
+            }]
+        }),
     );
+
+    let stream_body = format!(")]}}'\n{frame1}\n{frame2}\n");
 
     Mock::given(method("POST"))
         .and(path_regex("^/_/BardChatUi/data"))

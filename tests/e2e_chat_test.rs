@@ -180,14 +180,10 @@ fn gemini_app_response() -> String {
 }
 
 fn gemini_stream_generate_response(text: &str) -> String {
-    // The adapter skips the anti-XSSI line and recursively searches for this
-    // schema path: candidates[0].parts[0].text.
-    let inner = json!({
-        "candidates": [{
-            "parts": [{"text": text}]
-        }]
-    });
-    format!(")]}}'\n{inner}\n")
+    // The adapter skips the anti-XSSI line and recursively searches the
+    // positional schema path: response[4][0][1][0].
+    let frame = json!([null, null, null, null, [["candidate", [text]]]]);
+    format!(")]}}'\n{frame}\n")
 }
 /// Pre-seeds fake credentials on disk so the identity service starts in Stale
 /// (not Unconfigured) state and can build auth headers.

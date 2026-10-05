@@ -54,8 +54,8 @@ var data = {"cfb2h":"bl-value-001","FdrFJe":"fsid-value","SNlM0e":"snlm0e-value"
 </script></html>"#;
 
 /// A response body the gemini adapter stream parser accepts as a completion.
-const STREAM_OK_BODY: &str =
-    ")]}'\n{\"candidates\":[{\"parts\":[{\"text\":\"response text\"}]}]}\n";
+/// The positional schema path `response[4][0][1][0]` resolves to the text.
+const STREAM_OK_BODY: &str = ")]}'\n[null,null,null,null,[[\"candidate\",[\"response text\"]]]]\n";
 
 async fn bind_listener() -> (tokio::net::TcpListener, u16) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
