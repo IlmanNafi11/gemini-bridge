@@ -558,13 +558,11 @@ fn malformed_payload_returns_schema_mismatch_without_panicking() {
 #[test]
 fn schema_positional_mismatch_returns_error_safely() {
     let mismatched = GeminiWebSchema {
-        user_message: 0,
-        conversation_id: 1,
-        response_id: 2,
         candidate_text_path: vec![
             PathSegment::Field("nonexistent".to_owned()),
             PathSegment::Index(0),
         ],
+        ..GeminiWebSchema::default()
     };
     let err = parse_non_stream_response(FIXTURE_RESPONSE.as_bytes(), &mismatched)
         .err()
@@ -619,10 +617,15 @@ async fn request_envelope_uses_browser_outer_shape() {
     let inner: serde_json::Value = serde_json::from_str(inner_json).unwrap();
     let inner = inner.as_array().unwrap();
     assert_eq!(
-        inner[0][0], serde_json::json!("Hello Gemini"),
+        inner[0][0],
+        serde_json::json!("Hello Gemini"),
         "prompt goes to inner[0][0]"
     );
-    assert_eq!(inner[1], serde_json::json!(["en"]), "language tag at inner[1]");
+    assert_eq!(
+        inner[1],
+        serde_json::json!(["en"]),
+        "language tag at inner[1]"
+    );
     assert!(inner[71].is_null(), "no conversation id on first turn");
 }
 
@@ -658,7 +661,10 @@ async fn request_envelope_threads_conversation_id_at_index_71() {
         serde_json::Value::String("c_abc123".to_owned()),
     );
     let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
-    adapter.generate_non_stream(Arc::new(request)).await.unwrap();
+    adapter
+        .generate_non_stream(Arc::new(request))
+        .await
+        .unwrap();
 
     let form: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(observed_body.lock().as_bytes())
@@ -688,17 +694,34 @@ fn candidate_extraction_ignores_nested_classifier_labels() {
         null,
         null,
         [["rc_cand", [real_answer]]],
-        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-        null, null, null,
-        [null, null, null, false, [[["Academic - Other", 2.4e-5], ["Coding", 0.0009]]]],
-    ]);
-    let frame = serde_json::json!([[
-        "wrb.fr",
         null,
-        serde_json::to_string(&inner).unwrap()
-    ]]);
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        [
+            null,
+            null,
+            null,
+            false,
+            [[["Academic - Other", 2.4e-5], ["Coding", 0.0009]]]
+        ],
+    ]);
+    let frame = serde_json::json!([["wrb.fr", null, serde_json::to_string(&inner).unwrap()]]);
     let body = format!(")]}}'\n\n812\n{frame}\n25\n[[\"di\",59]]\n");
-    let text =
-        parse_non_stream_response(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
+    let text = parse_non_stream_response(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
     assert_eq!(text, real_answer);
 }

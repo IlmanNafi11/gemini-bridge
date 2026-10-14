@@ -12,9 +12,10 @@ fn from_toml_parses_canonical_schema_file() {
     let src = include_str!("../../../schema/gemini-web.toml");
     let schema = GeminiWebSchema::from_toml(src).expect("canonical schema must parse");
 
-    assert_eq!(schema.user_message, 0);
-    assert_eq!(schema.conversation_id, 1);
-    assert_eq!(schema.response_id, 2);
+    assert_eq!(schema.inner_message_index, 0);
+    assert_eq!(schema.inner_language_index, 1);
+    assert_eq!(schema.inner_context_index, 17);
+    assert_eq!(schema.inner_conversation_index, 71);
     assert_eq!(
         schema.candidate_text_path,
         vec![
@@ -60,9 +61,10 @@ fn from_toml_rejects_negative_index_in_candidate_path() {
     // non-negative integers. A value that cannot parse as usize is an error.
     let src = r#"
 [positions]
-user_message = 0
-conversation_id = 1
-response_id = 2
+inner_message_index = 0
+inner_language_index = 1
+inner_context_index = 17
+inner_conversation_index = 71
 candidate_text_path = ["index", "-1"]
 "#;
     let err = GeminiWebSchema::from_toml(src).unwrap_err();
@@ -77,9 +79,10 @@ fn from_toml_rejects_odd_length_candidate_path() {
     // Path must be even-length (type, value) pairs.
     let src = r#"
 [positions]
-user_message = 0
-conversation_id = 1
-response_id = 2
+inner_message_index = 0
+inner_language_index = 1
+inner_context_index = 17
+inner_conversation_index = 71
 candidate_text_path = ["field"]
 "#;
     let err = GeminiWebSchema::from_toml(src).unwrap_err();
@@ -93,9 +96,10 @@ candidate_text_path = ["field"]
 fn from_toml_rejects_unknown_path_segment_type() {
     let src = r#"
 [positions]
-user_message = 0
-conversation_id = 1
-response_id = 2
+inner_message_index = 0
+inner_language_index = 1
+inner_context_index = 17
+inner_conversation_index = 71
 candidate_text_path = ["weird", "0"]
 "#;
     let err = GeminiWebSchema::from_toml(src).unwrap_err();
@@ -110,9 +114,10 @@ fn from_toml_rejects_duplicate_positional_indices() {
     // All three positional indices must be distinct.
     let src = r#"
 [positions]
-user_message = 0
-conversation_id = 0
-response_id = 2
+inner_message_index = 0
+inner_language_index = 0
+inner_context_index = 17
+inner_conversation_index = 71
 candidate_text_path = ["field", "candidates", "index", "0", "field", "parts", "index", "0", "field", "text"]
 "#;
     let err = GeminiWebSchema::from_toml(src).unwrap_err();
