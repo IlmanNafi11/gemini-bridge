@@ -153,6 +153,39 @@ async fn push_upload_initiation_retries_transient_disconnect_then_succeeds() {
 }
 
 #[tokio::test]
+async fn push_upload_initiation_sends_content_length_zero_body() {
+    // Google content-push returns `411 Length Required` for an initiation POST
+    // that carries no `Content-Length` (i.e. an empty request body). The bridge
+    // must send an explicit empty body so the initiated session is accepted.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0_u8; 4096];
+        let read = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&request[..read]).to_lowercase()
+    });
+
+    let client = HttpPushUploadClient::with_endpoint(
+        Arc::new(DummyIdentity),
+        transport(),
+        format!("http://{address}/upload/"),
+    )
+    .unwrap();
+    // The server never responds, so the request times out; we only need to
+    // observe the bytes it wrote on the wire.
+    let _ = client.initiate_session("image/png", 10).await;
+
+    let raw = server.await.unwrap();
+    assert!(
+        raw.contains("content-length: 0"),
+        "initiation POST must carry Content-Length: 0, saw:\n{raw}"
+    );
+}
+
+#[tokio::test]
 async fn push_upload_initiate_surfaces_upstream_failure() {
     // Transient transport retries are the shared transport layer's job: this
     // call marks initiation SafeToRetry. A non-transient HTTP status surfaces.

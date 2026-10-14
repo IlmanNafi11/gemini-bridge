@@ -65,6 +65,10 @@ impl HttpPushUploadClient {
     }
 }
 
+/// Feed identity required by content-push ("Request without ClientId (Feed
+/// name)" otherwise). Matches the Gemini web client's fixed feed.
+const PUSH_ID: &str = "feeds/mcudyrk2a4khkz";
+
 #[derive(Clone, Copy)]
 enum UploadPhase {
     Init,
@@ -92,6 +96,11 @@ impl PushUploadClient for HttpPushUploadClient {
         size_bytes: u64,
     ) -> Result<String, UploadError> {
         let mut headers = self.auth_headers(UploadPhase::Init)?;
+        // content-push requires a client identity ("ClientId (Feed name)") on
+        // every request; the Gemini web client sends a fixed feed ID plus the
+        // bard-storage tenant marker.
+        headers.insert("Push-ID", HeaderValue::from_static(PUSH_ID));
+        headers.insert("X-Tenant-Id", HeaderValue::from_static("bard-storage"));
         headers.insert("X-Goog-Upload-Command", HeaderValue::from_static("start"));
         headers.insert(
             "X-Goog-Upload-Protocol",
@@ -107,13 +116,17 @@ impl PushUploadClient for HttpPushUploadClient {
             HeaderValue::from_str(mime_type)
                 .map_err(|_| UploadError::PushInitFailed("invalid content type".into()))?,
         );
+        // Google content-push rejects a bodyless POST with `411 Length
+        // Required`; reqwest omits `Content-Length` for an empty body, so the
+        // header is set explicitly.
+        headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("0"));
         let response = self
             .transport
             .execute(TransportRequest {
                 method: Method::POST,
                 url: self.endpoint.clone(),
                 headers,
-                body: None,
+                body: Some(Bytes::new()),
                 idempotency: Idempotency::SafeToRetry,
             })
             .await
@@ -139,14 +152,21 @@ impl PushUploadClient for HttpPushUploadClient {
         let url = Url::parse(session_url)
             .map_err(|_| UploadError::PushUploadFailed("invalid upload session URL".into()))?;
         let mut headers = self.auth_headers(UploadPhase::Upload)?;
+        headers.insert("Push-ID", HeaderValue::from_static(PUSH_ID));
+        headers.insert("X-Tenant-Id", HeaderValue::from_static("bard-storage"));
         headers.insert(
             "X-Goog-Upload-Command",
             HeaderValue::from_static("upload, finalize"),
         );
+        headers.insert("X-Goog-Upload-Offset", HeaderValue::from_static("0"));
         headers.insert(
             http::header::CONTENT_LENGTH,
             HeaderValue::from_str(&bytes.len().to_string())
                 .map_err(|_| UploadError::PushUploadFailed("invalid content length".into()))?,
+        );
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
         );
         let response = self
             .transport
@@ -164,6 +184,15 @@ impl PushUploadClient for HttpPushUploadClient {
                 "upstream returned {}",
                 response.status
             )));
+        }
+        // The finalization response body is the plain-text fileRef path
+        // (e.g. `/contrib_service/ttl_1d/<id>`); some deployments instead
+        // return a JSON object that embeds it.
+        let body = std::str::from_utf8(&response.body)
+            .map_err(|_| UploadError::PushUploadFailed("invalid response encoding".into()))?;
+        let trimmed = body.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            return Ok(trimmed.to_owned());
         }
         let payload: Value = serde_json::from_slice(&response.body).map_err(|_| {
             UploadError::PushUploadFailed("upstream returned invalid response".into())
