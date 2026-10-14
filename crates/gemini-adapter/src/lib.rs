@@ -199,7 +199,8 @@ impl DefaultGeminiAdapter {
             .append_pair("_reqid", &request_id.to_string())
             .append_pair("rt", "c")
             .append_pair("hl", "en")
-            .append_pair("bl", &bootstrap.bl);
+            .append_pair("bl", &bootstrap.bl)
+            .append_pair("f.sid", &bootstrap.fsid);
 
         let mut headers = HeaderMap::new();
         self.identity
@@ -504,6 +505,14 @@ pub fn parse_raw_response(body: &[u8]) -> Result<Value, GeminiAdapterError> {
 }
 
 /// Parse newline-framed Gemini Web output and return the latest cumulative text.
+///
+/// Extraction happens at the frame's top level only: each upstream frame is
+/// `[["wrb.fr", null, "<JSON string>"]]` and the candidate text lives at
+/// `<inner>[4][x][1][0]` per the configured path. A recursive walk must not be
+/// used here: Gemini Web also embeds an intent-classifier block whose labels
+/// (e.g. "Coding") sit at `<inner>[24][4][0][1][0]` and match the same
+/// relative path, silently overriding the real answer (observed live
+/// 2026-10-13; see the candidate-extraction regression test).
 pub fn parse_non_stream_response(
     body: &[u8],
     schema: &GeminiWebSchema,
@@ -522,7 +531,9 @@ pub fn parse_non_stream_response(
             continue;
         };
         parsed_frame = true;
-        find_candidate_text(&value, schema, &mut latest);
+        if let Some(snapshot) = frame_candidate_text(&value, schema) {
+            latest = Some(snapshot);
+        }
     }
 
     latest.ok_or_else(|| {
@@ -535,34 +546,22 @@ pub fn parse_non_stream_response(
     })
 }
 
-pub(crate) fn find_candidate_text(
-    value: &Value,
-    schema: &GeminiWebSchema,
-    latest: &mut Option<String>,
-) {
-    if let Ok(text) = schema.extract_candidate_text(value) {
-        *latest = Some(text.to_owned());
+/// Extract the cumulative candidate text from one newline frame.
+///
+/// The frame wraps the response payload as a JSON-encoded string at
+/// `frame[0][2]`; the payload itself is the object the schema path navigates.
+/// Returns `None` for control frames (`di`, `e`) and metadata-only frames.
+fn frame_candidate_text(value: &Value, schema: &GeminiWebSchema) -> Option<String> {
+    // Each line is `[["wrb.fr", null, "<json string>"]]`: index 0 is the record.
+    let record = value.get(0)?.as_array()?;
+    if record.first()?.as_str() != Some("wrb.fr") {
+        return None;
     }
-
-    match value {
-        Value::Array(values) => {
-            for child in values {
-                find_candidate_text(child, schema, latest);
-            }
-        }
-        Value::Object(values) => {
-            for child in values.values() {
-                find_candidate_text(child, schema, latest);
-            }
-        }
-        Value::String(encoded) => {
-            if let Ok(child) = serde_json::from_str::<Value>(encoded) {
-                find_candidate_text(&child, schema, latest);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
+    let encoded = record.get(2)?.as_str()?;
+    let payload: Value = serde_json::from_str(encoded).ok()?;
+    schema.extract_candidate_text(&payload).ok().map(str::to_owned)
 }
+
 /// Parse Gemini response frames and extract conversation/response/candidate identifiers.
 pub fn parse_non_stream_metadata(body: &[u8]) -> Option<GeminiWebMetadata> {
     let response = std::str::from_utf8(body).ok()?;

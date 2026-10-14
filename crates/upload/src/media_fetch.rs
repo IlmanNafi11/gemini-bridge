@@ -115,7 +115,14 @@ impl MediaFetchPolicy {
     /// Production policy for provider-returned media URLs.
     pub fn provider_cdn() -> Self {
         Self {
-            allowed_hosts: vec!["googleusercontent.com".to_owned()],
+            // Gemini's generated-image CDN 302s `lh3.googleusercontent.com`
+            // to `*.usercontent.google.com` (e.g. `work.fife.…`), a distinct
+            // Google-owned domain. Both hosts are allowed; per-label suffix
+            // matching still rejects look-alike hosts.
+            allowed_hosts: vec![
+                "googleusercontent.com".to_owned(),
+                "usercontent.google.com".to_owned(),
+            ],
             strict_network: true,
             require_https: true,
             max_bytes: 20 * 1024 * 1024,
@@ -206,6 +213,36 @@ impl MediaDownloader for HardenedMediaDownloader {
     }
 }
 
+/// Production downloader that forwards the Gemini session cookie to the
+/// provider CDN.
+///
+/// Gemini's generated-image CDN serves the final image only to requests
+/// carrying the session cookie (it 403s unauthenticated requests) and rejects
+/// requests that also carry `Authorization: SAPISIDHASH`. This downloader
+/// forwards only the cookie, resolved per download so refreshed sessions take
+/// effect immediately; the shared fetch policy still gates every hop, so the
+/// credential never leaves the allowlisted provider hosts.
+pub struct SessionCookieMediaDownloader {
+    identity: Arc<dyn gemini_bridge_identity::IdentityService>,
+}
+
+impl SessionCookieMediaDownloader {
+    pub fn new(identity: Arc<dyn gemini_bridge_identity::IdentityService>) -> Self {
+        Self { identity }
+    }
+}
+
+#[async_trait]
+impl MediaDownloader for SessionCookieMediaDownloader {
+    async fn download(&self, url: &Url, kind: MediaKind) -> Result<Bytes, UploadError> {
+        let policy = match kind {
+            MediaKind::Image => MediaFetchPolicy::provider_cdn(),
+            MediaKind::Video => MediaFetchPolicy::provider_https(),
+        };
+        fetch_media_with_headers(url, kind, &policy, self.identity.session_cookie()).await
+    }
+}
+
 /// Validate one URL hop against the fetch policy.
 fn validate_hop(url: &Url, policy: &MediaFetchPolicy) -> Result<(), UploadError> {
     if !url.username().is_empty() || url.password().is_some() {
@@ -269,7 +306,24 @@ pub async fn fetch_media(
     kind: MediaKind,
     policy: &MediaFetchPolicy,
 ) -> Result<Bytes, UploadError> {
-    fetch_media_with_resolver(url, kind, policy, Arc::new(SystemMediaHostResolver)).await
+    fetch_media_with_headers(url, kind, policy, None).await
+}
+
+/// Fetch with an optional `Cookie` header forwarded on every hop.
+///
+/// Gemini's generated-image CDN 302s across `googleusercontent.com` and
+/// `usercontent.google.com` and serves the final image only to requests
+/// carrying the Gemini session cookie; it rejects requests that also carry an
+/// `Authorization: SAPISIDHASH` header. Only the cookie is forwarded, and
+/// never to a host outside the policy allowlist.
+pub async fn fetch_media_with_headers(
+    url: &Url,
+    kind: MediaKind,
+    policy: &MediaFetchPolicy,
+    cookie: Option<String>,
+) -> Result<Bytes, UploadError> {
+    fetch_media_with_resolver_and_cookie(url, kind, policy, cookie, Arc::new(SystemMediaHostResolver))
+        .await
 }
 
 /// Fetch with an injected resolver for deterministic DNS-pinning tests.
@@ -280,9 +334,20 @@ pub async fn fetch_media_with_resolver(
     policy: &MediaFetchPolicy,
     resolver: Arc<dyn MediaHostResolver>,
 ) -> Result<Bytes, UploadError> {
+    fetch_media_with_resolver_and_cookie(url, kind, policy, None, resolver).await
+}
+
+#[doc(hidden)]
+pub async fn fetch_media_with_resolver_and_cookie(
+    url: &Url,
+    kind: MediaKind,
+    policy: &MediaFetchPolicy,
+    cookie: Option<String>,
+    resolver: Arc<dyn MediaHostResolver>,
+) -> Result<Bytes, UploadError> {
     match tokio::time::timeout(
         policy.total_timeout,
-        fetch_media_inner(url, kind, policy, resolver.as_ref()),
+        fetch_media_inner(url, kind, policy, cookie.as_deref(), resolver.as_ref()),
     )
     .await
     {
@@ -295,6 +360,7 @@ async fn fetch_media_inner(
     url: &Url,
     kind: MediaKind,
     policy: &MediaFetchPolicy,
+    cookie: Option<&str>,
     resolver: &dyn MediaHostResolver,
 ) -> Result<Bytes, UploadError> {
     let mut current = url.clone();
@@ -321,8 +387,13 @@ async fn fetch_media_inner(
             .build()
             .map_err(|_| UploadError::SsrfDenied("media fetch client build failed".into()))?;
 
-        let response = client
-            .get(current.clone())
+        let mut request = client.get(current.clone());
+        if let Some(cookie) = cookie {
+            // Only forward the session cookie to allowlisted provider hosts;
+            // `validate_hop` has already rejected any host outside the policy.
+            request = request.header(reqwest::header::COOKIE, cookie);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| media_fetch_error(&e))?;
@@ -410,6 +481,20 @@ mod tests {
         assert!(!policy.host_allowed("evil-googleusercontent.com"));
         assert!(!policy.host_allowed("googleusercontent.com.evil.test"));
         assert!(!policy.host_allowed("example.com"));
+    }
+
+    #[test]
+    fn provider_cdn_allows_generated_image_redirect_host() {
+        // Regression guard: Gemini's generated-image CDN 302s from
+        // lh3.googleusercontent.com to *.usercontent.google.com (observed:
+        // work.fife.usercontent.google.com, 2026-10-13). That host must pass
+        // the policy while look-alikes still fail.
+        let policy = MediaFetchPolicy::provider_cdn();
+        assert!(policy.host_allowed("work.fife.usercontent.google.com"));
+        assert!(policy.host_allowed("usercontent.google.com"));
+        assert!(!policy.host_allowed("evilusercontent.google.com"));
+        assert!(!policy.host_allowed("usercontent.google.com.evil.test"));
+        assert!(!policy.host_allowed("usercontent.google.com.evil"));
     }
 
     #[test]

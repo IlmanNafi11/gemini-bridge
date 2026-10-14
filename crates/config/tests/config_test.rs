@@ -76,6 +76,41 @@ fn environment_override_child() {
     let config = BridgeConfig::load_from_file(std::path::Path::new(&path)).unwrap();
     assert_eq!(config.server.port, 9000);
 }
+
+#[test]
+fn bridge_server_api_key_environment_override_sets_api_key() {
+    // Regression guard: the old `split("_")` env mapping turned
+    // BRIDGE_SERVER_API_KEY into `server.api.key`, silently dropping the API
+    // key (a security regression on non-loopback binds). Documented override
+    // names like this one must map to their real config keys.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(&path, "").unwrap();
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("api_key_override_child")
+        .arg("--nocapture")
+        .env("CONFIG_TEST_PATH", &path)
+        .env("BRIDGE_SERVER_API_KEY", "0123456789abcdef0123456789abcdef")
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+}
+
+#[test]
+fn api_key_override_child() {
+    let Some(path) = std::env::var_os("CONFIG_TEST_PATH") else {
+        return;
+    };
+    let config = BridgeConfig::load_from_file(std::path::Path::new(&path)).unwrap();
+    assert_eq!(
+        config.server.api_key.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+}
+
 #[test]
 fn port_zero_is_rejected() {
     let dir = tempdir().unwrap();

@@ -12,7 +12,8 @@ pub mod ssrf;
 
 pub use error::UploadError;
 pub use media_fetch::{
-    HardenedMediaDownloader, MediaDownloader, MediaFetchPolicy, MediaKind, fetch_media,
+    HardenedMediaDownloader, MediaDownloader, MediaFetchPolicy, MediaKind,
+    SessionCookieMediaDownloader, fetch_media, fetch_media_with_headers,
 };
 pub use push_client::{HttpPushUploadClient, PushUploadClient};
 pub use ssrf::{is_address_allowed, resolve_and_check};

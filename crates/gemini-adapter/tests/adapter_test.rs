@@ -241,15 +241,16 @@ async fn stream_yields_complete_frames_before_upstream_finishes_and_drop_cancels
             }
         }
 
+        let payload = serde_json::json!([
+            null,
+            [null, null],
+            null,
+            null,
+            [["candidate_id", ["First frame"]]]
+        ]);
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!([
-                null,
-                [null, null],
-                null,
-                null,
-                [["candidate_id", ["First frame"]]]
-            ])
+            serde_json::json!([["wrb.fr", null, serde_json::to_string(&payload).unwrap()]])
         );
         let split = frame.len() / 2;
         socket
@@ -331,15 +332,16 @@ async fn mid_stream_upstream_close_surfaces_error_event_not_hang() {
             }
         }
 
+        let payload = serde_json::json!([
+            null,
+            [null, null],
+            null,
+            null,
+            [["candidate_id", ["Partial"]]]
+        ]);
         let frame = format!(
             ")]}}'\n{}\n",
-            serde_json::json!([
-                null,
-                [null, null],
-                null,
-                null,
-                [["candidate_id", ["Partial"]]]
-            ])
+            serde_json::json!([["wrb.fr", null, serde_json::to_string(&payload).unwrap()]])
         );
         socket
             .write_all(
@@ -568,4 +570,135 @@ fn schema_positional_mismatch_returns_error_safely() {
         .err()
         .unwrap();
     assert!(matches!(err, GeminiAdapterError::SchemaMismatch(_)));
+}
+
+#[tokio::test]
+async fn request_envelope_uses_browser_outer_shape() {
+    // Regression guard: Gemini Web's StreamGenerate handler ignores prompts
+    // sent as a positional triple `[msg, conversation, response]`. The browser
+    // sends `[null, "<JSON string>"]` where the inner payload carries the
+    // message at index 0 and the language tag at index 1. Observed live
+    // 2026-10-13: only the browser shape reaches the model.
+    let server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&server).await;
+    let config = make_config(_dir.path());
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .mount(&server)
+        .await;
+
+    let observed_body = Arc::new(parking_lot::Mutex::new(String::new()));
+    let observed_body_for_response = observed_body.clone();
+    Mock::given(method("POST"))
+        .and(path(
+            "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        ))
+        .respond_with(move |request: &wiremock::Request| {
+            *observed_body_for_response.lock() =
+                String::from_utf8_lossy(&request.body).into_owned();
+            ResponseTemplate::new(200).set_body_string(FIXTURE_RESPONSE)
+        })
+        .mount(&server)
+        .await;
+
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
+    adapter.generate_non_stream(test_request()).await.unwrap();
+
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(observed_body.lock().as_bytes())
+            .into_owned()
+            .collect();
+    let envelope: serde_json::Value =
+        serde_json::from_str(form.get("f.req").expect("form body must carry f.req")).unwrap();
+    let outer = envelope.as_array().expect("f.req must be an array");
+    assert_eq!(outer.len(), 2, "outer envelope must be [null, inner-json]");
+    assert!(outer[0].is_null(), "outer[0] must be null");
+    let inner_json = outer[1].as_str().expect("outer[1] must be a JSON string");
+    let inner: serde_json::Value = serde_json::from_str(inner_json).unwrap();
+    let inner = inner.as_array().unwrap();
+    assert_eq!(
+        inner[0][0], serde_json::json!("Hello Gemini"),
+        "prompt goes to inner[0][0]"
+    );
+    assert_eq!(inner[1], serde_json::json!(["en"]), "language tag at inner[1]");
+    assert!(inner[71].is_null(), "no conversation id on first turn");
+}
+
+#[tokio::test]
+async fn request_envelope_threads_conversation_id_at_index_71() {
+    let server = MockServer::start().await;
+    let (identity, _dir) = make_identity(&server).await;
+    let config = make_config(_dir.path());
+
+    Mock::given(method("GET"))
+        .and(path("/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(bootstrap_body()))
+        .mount(&server)
+        .await;
+
+    let observed_body = Arc::new(parking_lot::Mutex::new(String::new()));
+    let observed_body_for_response = observed_body.clone();
+    Mock::given(method("POST"))
+        .and(path(
+            "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate",
+        ))
+        .respond_with(move |request: &wiremock::Request| {
+            *observed_body_for_response.lock() =
+                String::from_utf8_lossy(&request.body).into_owned();
+            ResponseTemplate::new(200).set_body_string(FIXTURE_RESPONSE)
+        })
+        .mount(&server)
+        .await;
+
+    let mut request = LlmRequest::clone(&test_request());
+    request.metadata.insert(
+        "conversation_id".to_owned(),
+        serde_json::Value::String("c_abc123".to_owned()),
+    );
+    let adapter = DefaultGeminiAdapter::with_base_url(identity, config, server.uri()).unwrap();
+    adapter.generate_non_stream(Arc::new(request)).await.unwrap();
+
+    let form: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(observed_body.lock().as_bytes())
+            .into_owned()
+            .collect();
+    let envelope: serde_json::Value =
+        serde_json::from_str(form.get("f.req").expect("form body must carry f.req")).unwrap();
+    let inner: serde_json::Value =
+        serde_json::from_str(envelope.as_array().unwrap()[1].as_str().unwrap()).unwrap();
+    assert_eq!(
+        inner[71],
+        serde_json::json!(["c_abc123"]),
+        "continuation conversation id goes to inner[71]"
+    );
+}
+
+#[test]
+fn candidate_extraction_ignores_nested_classifier_labels() {
+    // Regression guard: a recursive walk over the whole frame matches the
+    // intent-classifier block at inner[24] (whose [4][0][1][0] is "Coding")
+    // and lets it overwrite the real answer at inner[4][0][1][0]. Observed
+    // live 2026-10-13: every chat returned "Coding" instead of the answer.
+    let real_answer = "The magic number is 555.";
+    let inner = serde_json::json!([
+        null,
+        ["c_conv", "r_resp"],
+        null,
+        null,
+        [["rc_cand", [real_answer]]],
+        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+        null, null, null,
+        [null, null, null, false, [[["Academic - Other", 2.4e-5], ["Coding", 0.0009]]]],
+    ]);
+    let frame = serde_json::json!([[
+        "wrb.fr",
+        null,
+        serde_json::to_string(&inner).unwrap()
+    ]]);
+    let body = format!(")]}}'\n\n812\n{frame}\n25\n[[\"di\",59]]\n");
+    let text =
+        parse_non_stream_response(body.as_bytes(), &GeminiWebSchema::default()).unwrap();
+    assert_eq!(text, real_answer);
 }

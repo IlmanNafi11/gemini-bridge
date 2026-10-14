@@ -23,6 +23,14 @@ pub trait IdentityService: Send + Sync {
     async fn snapshot(&self) -> SessionSnapshot;
     /// Apply authenticated Gemini session headers without exposing credential values.
     fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError>;
+    /// Return the raw `Cookie` header value for the current session, if any.
+    ///
+    /// Used by media downloads that must present the Gemini session cookie to
+    /// the provider CDN. Implementations without credential access return
+    /// `None`, which leaves such downloads unauthenticated.
+    fn session_cookie(&self) -> Option<String> {
+        None
+    }
     /// Import raw cookie header string, parse and persist credentials without
     /// probing upstream.
     ///
@@ -204,6 +212,16 @@ impl IdentityService for DefaultIdentityService {
                 Err(error)
             }
         }
+    }
+
+    fn session_cookie(&self) -> Option<String> {
+        let st = self.state.lock();
+        st.credentials.as_ref().map(|creds| {
+            format!(
+                "__Secure-1PSID={}; __Secure-1PSIDTS={}; SAPISID={}",
+                creds.psid, creds.psidts, creds.sapisid
+            )
+        })
     }
     fn apply_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), IdentityError> {
         let (cookie_header, sapisid) = {

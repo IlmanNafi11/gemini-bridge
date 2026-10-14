@@ -1,23 +1,38 @@
-# Gemini Web wire-protocol positional schema for gemini-bridge.
+# Gemini Web wire-protocol schema for gemini-bridge.
 #
-# These values define the positions inside the `f.req` JSON envelope and the
-# traversal path that locates candidate text inside the newline-framed response.
+# These values define the shape of the `f.req` JSON envelope and the traversal
+# path that locates candidate text inside the newline-framed response.
 # All indices are 0-based.
+#
+# Verified against the gemini.google.com web client's own StreamGenerate
+# requests (browser trace capture, 2026-10-13):
+#   f.req = [null, "<JSON string>"]  — the inner payload is a JSON-encoded
+#   string; sending a positional triple instead makes upstream ignore the
+#   prompt and answer an empty conversation.
 #
 # When updating this file, run the adapter's self-check before shipping:
 #   cargo test -p gemini-bridge-adapter-gemini
 
 [positions]
-# Index of the user message string in the f.req outer array.
-user_message = 0
-# Index of the upstream conversation ID in the f.req outer array (null when new).
-conversation_id = 1
-# Index of the upstream response ID in the f.req outer array (null when new).
-response_id = 2
+# Number of slots in the inner payload. The web client emits 99 slots; upstream
+# accepts any length that places the threaded fields correctly.
+inner_len = 72
+# Inner slot holding the message tuple [text, 0, null, null, null, null, 0].
+inner_message_index = 0
+# Inner slot holding the language tag ["en"].
+inner_language_index = 1
+# Inner slot holding [[1]] (context marker observed in the browser trace).
+inner_context_index = 17
+# Inner slot holding the upstream conversation ID on continuation turns
+# ([null, ...] for the first message of a conversation).
+inner_conversation_index = 71
 
-# Path to cumulative candidate text inside each response frame.
+# Path to cumulative candidate text inside the decoded response payload.
 # Elements are alternating type and value pairs:
 #   "field" followed by the field name, or "index" followed by the 0-based index.
+# Extraction is done at the frame's top level only — the payload also embeds an
+# intent-classifier block (payload[24][4][0][1][0]) whose labels would match a
+# recursive walk and overwrite the real answer.
 candidate_text_path = [
     "index", "4",
     "index", "0",

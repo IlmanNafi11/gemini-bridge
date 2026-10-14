@@ -787,6 +787,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "uncased",
 ]
 
 [[package]]

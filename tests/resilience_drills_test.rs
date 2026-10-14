@@ -53,9 +53,9 @@ const APP_HTML: &str = r#"<html><script>
 var data = {"cfb2h":"bl-value-001","FdrFJe":"fsid-value","SNlM0e":"snlm0e-value"};
 </script></html>"#;
 
-/// A response body the gemini adapter stream parser accepts as a completion.
-/// The positional schema path `response[4][0][1][0]` resolves to the text.
-const STREAM_OK_BODY: &str = ")]}'\n[null,null,null,null,[[\"candidate\",[\"response text\"]]]]\n";
+/// A real wire frame: `[["wrb.fr", null, "<json string>"]]`; the payload's
+/// `[4][0][1][0]` resolves to the text.
+const STREAM_OK_BODY: &str = ")]}'\n[[\"wrb.fr\",null,\"[null,null,null,null,[[\\\"candidate\\\",[\\\"response text\\\"]]]]\"]]\n";
 
 async fn bind_listener() -> (tokio::net::TcpListener, u16) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

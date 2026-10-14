@@ -101,11 +101,32 @@ impl BridgeConfig {
         })?;
         let figment = defaults_figment()
             .merge(Toml::string(&composed))
-            .merge(Env::prefixed("BRIDGE_").split("_"));
+            .merge(Env::prefixed("BRIDGE_").map(map_env_key));
         let config: BridgeConfig = figment.extract()?;
         validate(&config)?;
         Ok(config)
     }
+}
+
+/// Map a `BRIDGE_*` environment variable suffix to its config key path.
+///
+/// The naive `split("_")` mapping was wrong: `BRIDGE_SERVER_API_KEY` became
+/// `server.api.key` instead of `server.api_key`, silently dropping the API key
+/// (the same class of bug hit every multi-word leaf such as `bind_addr`,
+/// `data_dir`, `metrics_enabled`, and the `rate_limit` sub-fields). This maps
+/// only the section segment; leaf names keep their underscores.
+fn map_env_key(suffix: &uncased::UncasedStr) -> uncased::Uncased<'_> {
+    const SECTIONS: [&str; 4] = ["server", "storage", "transport", "video"];
+    // The mapper runs before figment lowercases keys, so match case-insensitively
+    // against the raw env suffix (`SERVER_API_KEY`).
+    let key = suffix.as_str().to_ascii_lowercase();
+    for section in SECTIONS {
+        let prefix = format!("{section}_");
+        if let Some(leaf) = key.strip_prefix(&prefix) {
+            return uncased::Uncased::from(format!("{section}.{leaf}"));
+        }
+    }
+    uncased::Uncased::from(key)
 }
 
 fn load_document(path: Option<&Path>) -> Result<Value, ConfigError> {

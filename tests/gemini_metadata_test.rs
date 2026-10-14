@@ -137,11 +137,13 @@ fn parse_sse(raw: &str) -> (Vec<String>, bool) {
     (data_lines, has_done)
 }
 
-/// Build a Gemini StreamGenerate frame in the live array-based schema, where
-/// `response[4][0][1][0]` resolves to `text`. `extra` is appended as a trailing
-/// keyed object so key-based metadata extraction still sees named fields.
+/// Build a Gemini StreamGenerate frame in the live wire shape, where the
+/// payload is a JSON-encoded string at `frame[0][2]` and `payload[4][0][1][0]`
+/// resolves to `text`. `extra` is appended as a trailing keyed object so
+/// key-based metadata extraction still sees named fields.
 fn gemini_frame(text: &str, extra: Value) -> String {
-    let frame = json!([null, null, null, null, [["candidate", [text]]], extra]);
+    let payload = json!([null, null, null, null, [["candidate", [text]]], extra]);
+    let frame = json!([["wrb.fr", null, serde_json::to_string(&payload).unwrap()]]);
     serde_json::to_string(&frame).unwrap()
 }
 

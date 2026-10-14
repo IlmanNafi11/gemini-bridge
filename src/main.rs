@@ -104,8 +104,19 @@ async fn run_server(config: BridgeConfig) -> Result<(), String> {
         UploadLimits::default(),
     ));
     let upload_service: Option<Arc<dyn UploadService>> = Some(upload.clone());
+    // Image downloads must carry the Gemini session cookie: the provider CDN
+    // 403s the final redirect hop for unauthenticated requests.
+    let media_downloader: Arc<dyn gemini_bridge_upload::MediaDownloader> = Arc::new(
+        gemini_bridge_upload::SessionCookieMediaDownloader::new(identity_svc.clone()),
+    );
     let image_service: Option<Arc<dyn ImageGenService>> = Some(Arc::new(
-        DefaultImageGenService::new(adapter.clone(), local_store, upload, "gemini-web-flash"),
+        DefaultImageGenService::with_downloader(
+            adapter.clone(),
+            local_store,
+            upload,
+            "gemini-web-flash",
+            media_downloader,
+        ),
     ));
 
     let db_path = config.storage.data_dir.join("bridge.sqlite");

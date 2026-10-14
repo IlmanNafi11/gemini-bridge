@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::prefix_diff::{Delta, PrefixDiff};
 use crate::schema::GeminiWebSchema;
 use crate::{
-    GeminiAdapterError, GeminiWebMetadata, find_candidate_text, parse_non_stream_metadata,
+    GeminiAdapterError, GeminiWebMetadata, frame_candidate_text, parse_non_stream_metadata,
 };
 
 /// Maximum bytes retained for one newline-delimited upstream frame.
@@ -46,9 +46,7 @@ pub fn parse_stream_body(
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let mut latest = None;
-        find_candidate_text(&value, schema, &mut latest);
-        if let Some(snapshot) = latest {
+        if let Some(snapshot) = frame_candidate_text(&value, schema) {
             parsed_frame = true;
             if let Some(delta) = diff.update(&snapshot) {
                 let text = match delta {
@@ -173,9 +171,7 @@ impl ParserState {
             merge_metadata(&mut self.metadata, metadata);
         }
 
-        let mut latest = None;
-        find_candidate_text(&value, &self.schema, &mut latest);
-        if let Some(snapshot) = latest {
+        if let Some(snapshot) = frame_candidate_text(&value, &self.schema) {
             self.parsed_frame = true;
             if let Some(delta) = self.diff.update(&snapshot) {
                 let text = match delta {
@@ -275,10 +271,19 @@ mod tests {
 
     use super::*;
 
+    /// Build one upstream frame in the real wire shape: the candidate payload
+    /// is a JSON-encoded string at `frame[0][2]` of a `wrb.fr` record.
     fn frame(text: &str) -> String {
+        let payload = json!([
+            null,
+            ["c_conv", "r_resp"],
+            null,
+            null,
+            [["rc_cand", [text]]],
+        ]);
         format!(
             ")]}}'\n{}\n",
-            json!([null, null, null, null, [["candidate", [text]]]])
+            json!([["wrb.fr", null, serde_json::to_string(&payload).unwrap()]])
         )
     }
 
