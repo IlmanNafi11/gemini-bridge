@@ -37,6 +37,7 @@ fn make_config(temp_dir: &std::path::Path) -> Arc<BridgeConfig> {
             tls_profile: "chrome".to_owned(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     })

@@ -48,6 +48,7 @@ fn transport() -> Arc<ReqwestTransport> {
             tls_profile: "chrome".into(),
             proxy_url: None,
             timeout_secs: 10,
+            stream_idle_timeout_secs: 30,
         })
         .unwrap(),
     )

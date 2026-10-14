@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use gemini_bridge_config::TransportConfig;
 use gemini_bridge_transport::{
@@ -13,6 +15,7 @@ fn config(timeout_secs: u64) -> TransportConfig {
         tls_profile: "chrome".to_string(),
         proxy_url: None,
         timeout_secs,
+        stream_idle_timeout_secs: 30,
     }
 }
 
@@ -68,6 +71,112 @@ async fn execute_stream_exposes_response_body_as_incremental_chunks() {
         body.extend_from_slice(&chunk.unwrap());
     }
     assert_eq!(body, b"first\nsecond\n");
+}
+
+/// A stream whose first body byte arrives after `timeout_secs` must still be
+/// delivered: the configured total timeout bounds buffered requests, not an
+/// open-ended incremental stream (R.2.1). The idle read window
+/// (`stream_idle_timeout_secs`) is what protects against a genuinely stalled
+/// connection, and it must be strictly longer than the total timeout.
+#[tokio::test]
+async fn execute_stream_survives_first_byte_after_total_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        // Drain the request headers, then answer immediately with headers only.
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  content-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\n\
+                  connection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        // Stall longer than the total timeout (2 s) but well within the idle
+        // window (30 s) before emitting the first body byte.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        socket.write_all(b"5\r\nhello\r\n0\r\n\r\n").await.unwrap();
+        socket.flush().await.unwrap();
+        // Hold the connection open briefly so the client can observe the chunk.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let transport = ReqwestTransport::new(&config(2)).unwrap();
+    let response = transport
+        .execute_stream(request(
+            Url::parse(&format!("http://{addr}/stream")).unwrap(),
+            Idempotency::NeverRetry,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+
+    use futures::StreamExt;
+    let mut body = response.body;
+    let mut collected = Vec::new();
+    while let Some(chunk) = body.next().await {
+        collected.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(collected, b"hello");
+    server_task.await.unwrap();
+}
+
+/// The complement: a stream that never sends a body byte within the idle
+/// window must fail with a timeout rather than hang forever, so the fix does
+/// not merely disable stream timeouts.
+#[tokio::test]
+async fn execute_stream_times_out_when_idle_window_elapses() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  content-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        // Never send a body byte; keep the socket open.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let mut transport_config = config(2);
+    transport_config.stream_idle_timeout_secs = 1;
+    let transport = ReqwestTransport::new(&transport_config).unwrap();
+    let response = transport
+        .execute_stream(request(
+            Url::parse(&format!("http://{addr}/stalled")).unwrap(),
+            Idempotency::NeverRetry,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+
+    use futures::StreamExt;
+    let mut body = response.body;
+    let outcome = tokio::time::timeout(Duration::from_secs(10), body.next()).await;
+    let first = outcome
+        .expect("idle timeout must fire within 10 s")
+        .expect("stream must yield an error item, not end silently");
+    assert!(
+        matches!(first, Err(TransportError::Timeout(_))),
+        "expected Timeout, got {first:?}"
+    );
+    server_task.abort();
 }
 
 #[tokio::test]

@@ -76,7 +76,7 @@ pub trait TransportService: Send + Sync {
 2. **Proxy Support:** HTTP and SOCKS5 proxy URLs are supported when configured; absent proxy connects directly.
 3. **Retry Separation:** Only transport errors explicitly marked transient may be retried. Provider HTTP status retries (`405`, `429`, etc.) remain outside this crate except when policy delegates idempotent status retry explicitly.
 4. **Idempotency:** Requests marked `NeverRetry` must never be repeated automatically.
-5. **Bounded Time:** Connect, request, and idle streaming timeouts are configured and finite.
+5. **Bounded Time:** Connect and idle streaming timeouts are configured and finite. `timeout_secs` is a **total deadline for buffered (`execute`) responses only**. Incremental (`execute_stream`) responses are never bounded in total: they use a connect timeout plus an idle read window (`stream_idle_timeout_secs`, reset on every received chunk), so a slow-but-flowing upstream SSE stream stays open while a stalled connection (no headers, or no bytes between chunks) is still detected.
 6. **No Secret Logging:** Cookie, Authorization, and upload token headers are redacted before traces are emitted.
 7. **Live Compatibility Boundary:** Deterministic tests establish profile headers and transport behavior only. Current Gemini Web compatibility requires an opt-in credentialed `doctor` or live request and remains external evidence; it is not required to describe the implemented profile contract truthfully.
 

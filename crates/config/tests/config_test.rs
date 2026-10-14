@@ -27,6 +27,7 @@ fn empty_toml_applies_all_defaults() {
     assert_eq!(config.transport.tls_profile, "chrome");
     assert_eq!(config.transport.proxy_url, None);
     assert_eq!(config.transport.timeout_secs, 30);
+    assert_eq!(config.transport.stream_idle_timeout_secs, 120);
     assert!(!config.video.enabled);
 }
 
@@ -48,6 +49,47 @@ fn metrics_can_be_enabled_explicitly() {
 
     let config = BridgeConfig::load_from_file(&path).unwrap();
     assert!(config.server.metrics_enabled);
+}
+
+#[test]
+fn stream_idle_timeout_can_be_set_explicitly() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(&path, "[transport]\nstream_idle_timeout_secs = 45\n").unwrap();
+
+    let config = BridgeConfig::load_from_file(&path).unwrap();
+    assert_eq!(config.transport.timeout_secs, 30);
+    assert_eq!(config.transport.stream_idle_timeout_secs, 45);
+}
+
+#[test]
+fn stream_idle_timeout_is_accepted_in_profile_and_patch_overlays() {
+    use gemini_bridge_config::Composition;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bridge.toml");
+    fs::write(
+        &path,
+        r#"
+[transport]
+timeout_secs = 30
+
+[profiles.tuned.transport]
+stream_idle_timeout_secs = 90
+
+[patches.network.transport]
+stream_idle_timeout_secs = 60
+"#,
+    )
+    .unwrap();
+
+    let composition = Composition::new()
+        .with_profile("tuned")
+        .with_patch("network");
+    let config = BridgeConfig::load_composed(Some(&path), &composition).unwrap();
+    // The patch (applied last) wins over the profile value.
+    assert_eq!(config.transport.stream_idle_timeout_secs, 60);
+    assert_eq!(config.transport.timeout_secs, 30);
 }
 
 #[test]

@@ -95,6 +95,7 @@ async fn multipart_upload_returns_id_and_get_returns_same_bytes() {
             tls_profile: "chrome".to_string(),
             proxy_url: None,
             timeout_secs: 10,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     });

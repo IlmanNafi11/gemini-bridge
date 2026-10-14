@@ -72,6 +72,7 @@ async fn make_state(wiremock_uri: &str, port: u16) -> (AppState, ServerConfig) {
             tls_profile: "chrome".to_string(),
             proxy_url: None,
             timeout_secs: 10,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     });

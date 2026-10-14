@@ -50,6 +50,13 @@ fn default_timeout_secs() -> u64 {
     30
 }
 
+/// Generous idle window for incremental streams: upstream latency between the
+/// request and the first SSE byte (and between SSE events) can exceed a minute
+/// under load, so the default exceeds the 30 s buffered-request timeout.
+fn default_stream_idle_timeout_secs() -> u64 {
+    120
+}
+
 fn default_concurrency_limit() -> usize {
     4
 }
@@ -202,6 +209,12 @@ pub struct TransportConfig {
     pub proxy_url: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Idle read timeout for incremental streams: the maximum time to wait for
+    /// the next chunk (including the response headers / first byte) before the
+    /// stream is considered stalled. Unlike [`Self::timeout_secs`], this is not
+    /// a total deadline, so a slow-but-flowing upstream stream stays open.
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
 }
 
 /// Video generation configuration (experimental, off-by-default).

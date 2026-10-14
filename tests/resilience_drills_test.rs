@@ -43,6 +43,7 @@ fn bridge_config(tmp: &std::path::Path) -> BridgeConfig {
             tls_profile: "chrome".to_string(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     }

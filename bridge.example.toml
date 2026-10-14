@@ -16,6 +16,10 @@ media_ttl_days = 30
 tls_profile = "chrome"
 # proxy_url = "socks5://127.0.0.1:1080"
 timeout_secs = 30
+# Total deadline for buffered (non-streaming) requests. Incremental SSE
+# streams are not bounded by this; they use an idle read window instead so a
+# slow-but-flowing upstream stream is not killed mid-response.
+# stream_idle_timeout_secs = 120
 
 [video]
 enabled = false

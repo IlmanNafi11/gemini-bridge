@@ -247,7 +247,12 @@ fn validate_overlay_fields(value: &Value, kind: &str, name: &str) -> Result<(), 
                 "metrics_enabled",
             ],
             "storage" => &["data_dir", "media_ttl_days"],
-            "transport" => &["tls_profile", "proxy_url", "timeout_secs"],
+            "transport" => &[
+                "tls_profile",
+                "proxy_url",
+                "timeout_secs",
+                "stream_idle_timeout_secs",
+            ],
             "video" => &["enabled"],
             _ => return Err(unknown_overlay_field(kind, name, section)),
         };
@@ -306,6 +311,7 @@ fn defaults_figment() -> Figment {
         tls_profile: "chrome".to_string(),
         proxy_url: None,
         timeout_secs: 30,
+        stream_idle_timeout_secs: 120,
     };
     let default_config = BridgeConfig {
         server: default_server,

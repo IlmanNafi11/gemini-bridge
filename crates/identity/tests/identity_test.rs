@@ -195,6 +195,7 @@ fn identity_service_rejects_weak_bridge_secret_without_cookie_file() {
             tls_profile: "chrome".into(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     };
@@ -426,6 +427,7 @@ async fn failed_candidate_validation_preserves_disk_and_live_credentials() {
             tls_profile: "chrome".into(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     };
@@ -511,6 +513,7 @@ async fn validated_candidate_replaces_disk_and_live_credentials_after_probe() {
             tls_profile: "chrome".into(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     };
@@ -576,6 +579,7 @@ async fn bootstrap_uses_imported_credentials_and_extracts_tokens() {
             tls_profile: "chrome".to_string(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     };
@@ -621,6 +625,7 @@ async fn apply_auth_headers_sets_expected_headers() {
             tls_profile: "chrome".to_string(),
             proxy_url: None,
             timeout_secs: 5,
+            stream_idle_timeout_secs: 30,
         },
         video: Default::default(),
     };

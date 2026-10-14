@@ -25,7 +25,12 @@ pub const MAX_BUFFERED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub struct ReqwestTransport {
     client: Client,
     tls_profile: TlsProfile,
+    /// Total deadline for buffered (`execute`) requests.
     timeout: Duration,
+    /// Idle read window for incremental (`execute_stream`) requests: the
+    /// maximum wait for the next chunk (including the first byte) before the
+    /// stream is treated as stalled. Never a total deadline.
+    stream_idle_timeout: Duration,
 }
 
 impl ReqwestTransport {
@@ -34,8 +39,20 @@ impl ReqwestTransport {
     /// Returns [`TransportError::ProxyFailure`] if the configured proxy URL is invalid,
     /// [`TransportError::UnsupportedTlsProfile`] for an unknown profile, and
     /// [`TransportError::Network`] for any other client-build failure.
+    ///
+    /// Timeout semantics are split by response shape:
+    ///
+    /// - Buffered responses (`execute`) are bounded end-to-end by
+    ///   `timeout_secs` (a total deadline).
+    /// - Incremental streams (`execute_stream`) are never bounded in total:
+    ///   they get `timeout_secs` as the connect deadline and
+    ///   `stream_idle_timeout_secs` as an idle read deadline that resets on
+    ///   every received chunk. A slow-but-flowing upstream stream therefore
+    ///   survives while a stalled connection (no headers, or no bytes between
+    ///   chunks) is still detected.
     pub fn new(config: &TransportConfig) -> Result<Self, TransportError> {
         let timeout = Duration::from_secs(config.timeout_secs);
+        let stream_idle_timeout = Duration::from_secs(config.stream_idle_timeout_secs);
         let profile_name = config.tls_profile.trim().to_ascii_lowercase();
         if !matches!(profile_name.as_str(), "chrome" | "firefox" | "safari") {
             return Err(TransportError::UnsupportedTlsProfile(
@@ -44,7 +61,9 @@ impl ReqwestTransport {
         }
         let tls_profile = profile_name.parse::<TlsProfile>().unwrap_or_default();
 
-        let mut builder = Client::builder().timeout(timeout);
+        let mut builder = Client::builder()
+            .connect_timeout(timeout)
+            .read_timeout(stream_idle_timeout);
 
         if let Some(proxy_url) = &config.proxy_url {
             let proxy = reqwest::Proxy::all(proxy_url.as_str())
@@ -60,6 +79,7 @@ impl ReqwestTransport {
             client,
             tls_profile,
             timeout,
+            stream_idle_timeout,
         })
     }
 }
@@ -82,21 +102,28 @@ impl TransportService for ReqwestTransport {
             });
         }
 
-        let mut body = bytes::BytesMut::new();
-        let mut chunks = response.bytes_stream();
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|error| classify_error(error, self.timeout))?;
-            if chunk.len() > MAX_BUFFERED_RESPONSE_BYTES - body.len() {
-                return Err(TransportError::ResponseTooLarge {
-                    limit: MAX_BUFFERED_RESPONSE_BYTES,
-                });
+        // Buffered responses are fully materialized, so the configured total
+        // deadline applies end-to-end (unlike streams, which must stay open).
+        let body = tokio::time::timeout(self.timeout, async {
+            let mut body = bytes::BytesMut::new();
+            let mut chunks = response.bytes_stream();
+            while let Some(chunk) = chunks.next().await {
+                let chunk = chunk.map_err(|error| classify_error(error, self.timeout))?;
+                if chunk.len() > MAX_BUFFERED_RESPONSE_BYTES - body.len() {
+                    return Err(TransportError::ResponseTooLarge {
+                        limit: MAX_BUFFERED_RESPONSE_BYTES,
+                    });
+                }
+                body.extend_from_slice(&chunk);
             }
-            body.extend_from_slice(&chunk);
-        }
+            Ok::<bytes::Bytes, TransportError>(body.freeze())
+        })
+        .await
+        .map_err(|_| TransportError::Timeout(self.timeout))??;
         Ok(TransportResponse {
             status,
             headers,
-            body: body.freeze(),
+            body,
         })
     }
 
@@ -107,11 +134,11 @@ impl TransportService for ReqwestTransport {
         let response = self.execute_response(request).await?;
         let status = response.status();
         let headers = convert_headers(response.headers());
-        let timeout = self.timeout;
+        let idle = self.stream_idle_timeout;
         let body: TransportByteStream = Box::pin(
             response
                 .bytes_stream()
-                .map(move |chunk| chunk.map_err(|error| classify_error(error, timeout))),
+                .map(move |chunk| chunk.map_err(|error| classify_error(error, idle))),
         );
         Ok(TransportStreamResponse {
             status,

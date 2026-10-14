@@ -60,7 +60,9 @@ pub struct TransportConfig {
     pub tls_profile: String, // "chrome", "firefox", "safari"
     pub proxy_url: Option<String>,
     #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
+    pub timeout_secs: u64, // total deadline for buffered requests (default 30)
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64, // idle read window for SSE streams (default 120)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
