@@ -174,12 +174,11 @@ impl GeminiWebSchema {
         if let Some(conversation_id) = conversation_id {
             inner[self.inner_conversation_index] = serde_json::json!([conversation_id]);
         }
-        let inner_json =
-            serde_json::to_string(&Value::Array(inner)).map_err(|error| {
-                GeminiAdapterError::SchemaMismatch(format!(
-                    "cannot encode f.req inner payload: {error}"
-                ))
-            })?;
+        let inner_json = serde_json::to_string(&Value::Array(inner)).map_err(|error| {
+            GeminiAdapterError::SchemaMismatch(format!(
+                "cannot encode f.req inner payload: {error}"
+            ))
+        })?;
         Ok(serde_json::json!([Value::Null, inner_json]))
     }
 
@@ -204,7 +203,6 @@ impl GeminiWebSchema {
         })
     }
 }
-
 
 fn parse_candidate_path(raw_path: Vec<String>) -> Result<Vec<PathSegment>, SchemaLoadError> {
     if raw_path.is_empty() || !raw_path.len().is_multiple_of(2) {

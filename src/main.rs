@@ -109,15 +109,14 @@ async fn run_server(config: BridgeConfig) -> Result<(), String> {
     let media_downloader: Arc<dyn gemini_bridge_upload::MediaDownloader> = Arc::new(
         gemini_bridge_upload::SessionCookieMediaDownloader::new(identity_svc.clone()),
     );
-    let image_service: Option<Arc<dyn ImageGenService>> = Some(Arc::new(
-        DefaultImageGenService::with_downloader(
+    let image_service: Option<Arc<dyn ImageGenService>> =
+        Some(Arc::new(DefaultImageGenService::with_downloader(
             adapter.clone(),
             local_store,
             upload,
             "gemini-web-flash",
             media_downloader,
-        ),
-    ));
+        )));
 
     let db_path = config.storage.data_dir.join("bridge.sqlite");
     let conversation_store = SqliteConversationStore::open(&db_path)

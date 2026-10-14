@@ -559,7 +559,10 @@ fn frame_candidate_text(value: &Value, schema: &GeminiWebSchema) -> Option<Strin
     }
     let encoded = record.get(2)?.as_str()?;
     let payload: Value = serde_json::from_str(encoded).ok()?;
-    schema.extract_candidate_text(&payload).ok().map(str::to_owned)
+    schema
+        .extract_candidate_text(&payload)
+        .ok()
+        .map(str::to_owned)
 }
 
 /// Parse Gemini response frames and extract conversation/response/candidate identifiers.

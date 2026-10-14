@@ -322,8 +322,14 @@ pub async fn fetch_media_with_headers(
     policy: &MediaFetchPolicy,
     cookie: Option<String>,
 ) -> Result<Bytes, UploadError> {
-    fetch_media_with_resolver_and_cookie(url, kind, policy, cookie, Arc::new(SystemMediaHostResolver))
-        .await
+    fetch_media_with_resolver_and_cookie(
+        url,
+        kind,
+        policy,
+        cookie,
+        Arc::new(SystemMediaHostResolver),
+    )
+    .await
 }
 
 /// Fetch with an injected resolver for deterministic DNS-pinning tests.
@@ -393,10 +399,7 @@ async fn fetch_media_inner(
             // `validate_hop` has already rejected any host outside the policy.
             request = request.header(reqwest::header::COOKIE, cookie);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| media_fetch_error(&e))?;
+        let response = request.send().await.map_err(|e| media_fetch_error(&e))?;
 
         if response.status().is_redirection() {
             let location = response
