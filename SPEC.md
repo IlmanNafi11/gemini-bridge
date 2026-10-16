@@ -26,7 +26,7 @@ The core architecture follows the **"everything is a plugin"** philosophy (inspi
 
 ## 2. Capability Map & Module Architecture
 
-Per `agent-skills:spec-driven-development` preparation, the system is decomposed into 18 modular capabilities with explicit dependency boundaries. Each module corresponds to a dedicated crate in the Cargo workspace and has its own child specification document (`docs/specs/SPEC-<module-id>.md`). Module IDs identify crate directories; the Cargo package names are listed separately in the table and may differ (for example, `gemini-adapter` → `gemini-bridge-adapter-gemini`).
+Per `agent-skills:spec-driven-development` preparation, the system is decomposed into 19 modular capabilities (18 original plus the `session-vault` initiative in §2.3) with explicit dependency boundaries. Each module corresponds to a dedicated crate in the Cargo workspace and has its own child specification document (`docs/specs/SPEC-<module-id>.md`). Module IDs identify crate directories; the Cargo package names are listed separately in the table and may differ (for example, `gemini-adapter` → `gemini-bridge-adapter-gemini`).
 
 ### 2.1 Capability Map Table
 
@@ -50,6 +50,7 @@ Per `agent-skills:spec-driven-development` preparation, the system is decomposed
 | `gallery` | `gemini-bridge-gallery` | `/gallery` endpoint (JSON) + embedded static HTML UI (`include_str!`), thumbnail generation, media filter/deletion | `media-store`, `http-server` | Fase 2 |
 | `code-exec-surface` | `gemini-bridge-code-exec` | Extraction of `code_execution` (stdout/stderr) and grounding citations into non-intrusive `gemini_metadata` response extension | `gemini-adapter` | Fase 3 |
 | `video-adapter` | `gemini-bridge-adapter-video` | Deterministic request/error contract for an unshipped video capability; production exposes only the disabled 501 route and rejects enablement | `gemini-adapter`, `media-store` | Fase 3 |
+| `session-vault` | `gemini-bridge-identity` (vault module) | Multi-tenant session vault: per-client session create/replace/delete, token auth, encrypted cookie rows, per-session `1PSIDTS` rotation, tenant scoping. Child spec: `docs/specs/SPEC-session-vault.md` | `config`, `transport` | Fase 4 |
 
 ### 2.2 Dependency Direction & Build Order
 
@@ -115,6 +116,22 @@ flowchart LR
 ```
 
 The graph shows the direct dependencies declared in the capability map; runtime composition does not add crate-dependency edges.
+
+### 2.3 Initiative: Session Vault Multi-Tenant (Fase 4)
+
+Requested change: clients own their Gemini sessions entirely; the operator is
+never touched after deployment.
+
+| Module id (slice) | Responsibility | Depends on | Owning crate |
+|---|---|---|---|
+| `vault-store` | `sessions.sqlite` vault: CRUD, encrypted cookie envelope, token hashing, per-session rotation locks | `config`, `transport` | `crates/identity` |
+| `vault-api` | `/v1/sessions*` routes, dual auth (`api_key` + `X-Session-Token`), `401` taxonomy | `vault-store` | `crates/http-server` |
+| `vault-wiring` | Per-request session resolution, adapter/download plumbing, 405 rotation per session | `vault-api` | `crates/gemini-adapter`, `crates/upload`, `crates/http-server` |
+| `vault-scoping` | `session_id` column in `conversation-store` + `media-store`; tenant isolation | `vault-wiring` | `crates/conversation-store`, `crates/media-store` |
+| `vault-cutover` | Remove `cookies.json`, `/admin/reauth`, single-session state; CLI + docs migration | `vault-scoping` | `src/`, docs |
+
+Build order: `vault-store` → `vault-api` → `vault-wiring` → `vault-scoping` → `vault-cutover`.
+Single spec for all slices: `docs/specs/SPEC-session-vault.md` (the slices are not independently shippable capabilities, so one module spec covers them).
 
 ---
 
@@ -370,7 +387,7 @@ impl PluginContext {
 
 For explicit traceability, the following critical decisions were confirmed during the specification review:
 
-1. **Capability Scope:** Approved 18 modules structured across 7 dependency layers.
+1. **Capability Scope:** Approved 18 modules structured across 7 dependency layers, extended by the `session-vault` initiative (§2.3, Fase 4).
 2. **License:** MIT License.
 3. **Session Credentials:** Account policy uses project operator's designated Google account (configured locally/externally; never stored in git).
 4. **Plugin Architecture:** Built-in static registry with trait objects and built-in instance replacement for reload (zero `unsafe` dynamic loading). Each request clones the active generation before awaiting work; `POST /admin/reload-plugin` publishes a fully initialized generation atomically via `tokio::sync::RwLock`, and the old generation's disposer runs only after its final request handle drops.
@@ -379,8 +396,9 @@ For explicit traceability, the following critical decisions were confirmed durin
 7. **Transport Profiles:** Browser-named profiles are HTTP header presets only. The shipped client uses ordinary `reqwest`/`rustls` negotiation and makes no JA3, cipher-suite ordering, extension ordering, or ClientHello impersonation claim. Live Gemini compatibility remains an external, credentialed observation.
 8. **Media Capabilities:** Production video generation is not shipped. The disabled route contract returns HTTP 501, and `video.enabled = true` is rejected during configuration loading. Audio/TTS is also outside the shipped scope.
 9. **At-Rest Encryption:** Optional AES-GCM encryption for stored session tokens when `BRIDGE_SECRET` is supplied (fallback to OS-level `0600` file permissions).
-10. **Browser Automation:** Camofox is available in the local development environment for manual cookie extraction/testing, but is NOT a runtime dependency of the deployed binary.
 11. **Default Network Binding:** Configurable via `bridge.toml`, default `127.0.0.1:8090`.
+12. **Session Vault (Fase 4):** Per-client multi-tenant session vault replaces the single operator session. Clients create and own their sessions (`POST /v1/sessions`), authenticate with **both** the api_key and a session token, and re-authenticate on `401 needs_reauth`. Soft `__Secure-1PSIDTS` expiry auto-rotates per session; hard expiry is a client-side re-auth contract. Clean cutover: `cookies.json`, `POST /admin/reauth`, and the global single-session identity state are removed. Tenant scoping uses a `session_id` column on conversations and media. Child spec: `docs/specs/SPEC-session-vault.md`.
+13. **Multi-Tenancy Boundary:** The vault provides per-client session isolation only. Third-party SaaS multi-tenancy, billing, and cross-tenant quota management remain out of scope (see §8.3).
 
 ### Open Architecture Decisions
 

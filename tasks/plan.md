@@ -173,3 +173,74 @@ remediation pass. Work proceeds risk-first and remains on `dev`.
   responsive widths with keyboard navigation.
 - Docker/systemd checks and opt-in external tests are either observed passing or
   explicitly reported as external blockers; they are never inferred.
+
+---
+
+## Session Vault Multi-Tenant — Fase 4 (2026-10-16)
+
+**Specification:** `docs/specs/SPEC-session-vault.md` (approved) · root `SPEC.md` §2.3, decision 12–13.
+
+### Overview
+Replace the single operator-owned Gemini session with a per-client session
+vault. Clients create their own session (`POST /v1/sessions` with a Cookie
+header), receive a `ses_…` token, and authenticate every `/v1/*` request with
+**both** the api_key and `X-Session-Token`. Soft `__Secure-1PSIDTS` expiry
+auto-rotates per session; hard expiry returns `401 needs_reauth` and recovery
+is client-side re-auth. Clean cutover: `cookies.json`, `POST /admin/reauth`,
+and the global single-session identity state are removed. Tenant scoping adds
+`session_id` to conversations and media.
+
+### Architecture decisions (from spec §6, confirmed)
+- Vault lives in `crates/identity` (`vault.rs`); **no new crate**. Reuses
+  `crypto.rs` GBCK envelope, `parser.rs`, and `rotation.rs` wire logic.
+- Storage: separate `data_dir/sessions.sqlite` (rusqlite, busy_timeout 5 s,
+  0600) — `bridge.sqlite` stays untouched (no WAL retrofit).
+- Token: `ses_` + 32 random bytes, stored as SHA-256; raw shown once at create.
+- Session threading: middleware resolves token → session id → request
+  extension → `LlmRequest.metadata["session_id"]`; adapter resolves
+  credentials per request via the vault. `llm-service` stays session-agnostic.
+- Media downloads take the requester's session cookie per call
+  (`MediaDownloader` gains a session parameter); global downloader dies.
+- `AppState` gains a `vault` field; the `identity_service` field is removed at
+  cutover (task V.9) to avoid a two-system middle state in final code.
+- Rate-limit bucket key becomes `"{api_key_hash}:{session_id}"`.
+
+### Dependency graph (vertical slices)
+
+```mermaid
+flowchart TD
+  V1[V.1 VaultStore core] --> V2[V.2 Probe + lifecycle + per-session rotation]
+  V2 --> V3[V.3 Dual-auth middleware]
+  V3 --> V4[V.4 /v1/sessions routes]
+  V4 --> V5[V.5 Adapter per-request session]
+  V4 --> V6[V.6 Per-session media download]
+  V4 --> V7[V.7 Conversation tenant scoping]
+  V4 --> V8[V.8 Media/gallery tenant scoping]
+  V5 --> V9[V.9 Legacy removal + CLI migration]
+  V6 --> V9
+  V7 --> V9
+  V8 --> V9
+```
+
+V.5–V.8 are parallelizable after V.4; V.9 is sequential-last (cutover).
+
+### Work plan
+- **Phase A (V.1–V.2):** vault storage + lifecycle — checkpoint A.
+- **Phase B (V.3–V.4):** HTTP auth surface — checkpoint B (client loop works).
+- **Phase C (V.5–V.8):** consumer wiring + tenant scoping — checkpoints C/D.
+- **Phase D (V.9):** clean cutover, CLI, docs — checkpoint E (spec §8 acceptance).
+
+Task list with acceptance criteria: `tasks/todo.md` § Fase 4.
+
+### Risks and mitigations
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| `AppState`/`IdentityService` reshape ripples into ~18 e2e files | Med | Session-create helper in `tests/common/` introduced at V.4; suites migrate incrementally; workspace tests must stay green at every checkpoint |
+| 405 single-flight per session is concurrency-sensitive | Med | Reuse proven `rotation_lock` pattern keyed per session; wiremock concurrent-refresh tests at V.2 |
+| Tenant scoping migration on existing NULL rows | Med | V3 migration + documented first-session claim; fixture tests from V1/V2 shapes |
+| Legacy/global session leaks into vault path mid-build | Low | Cutover last (V.9) in one commit removes routes + state + storage together |
+| Client-side re-auth contract misunderstood | Low | Error taxonomy frozen in spec §6.2; contract tests assert exact codes |
+
+### Open questions
+- None blocking; spec §10 defaults (separate `X-Session-Token` header, no
+  session cap, no list endpoint) stand unless the review changes them.

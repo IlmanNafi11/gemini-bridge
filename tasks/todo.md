@@ -307,3 +307,96 @@
 - [x] **Checkpoint R-A:** every R.1–R.2 item has a focused regression test and passes.
 - [x] **Checkpoint R-B:** every R.3–R.4 item passes its focused tests and the complete suite.
 - [x] **Checkpoint R-C:** fmt/clippy/workspace tests/locked builds/`cargo audit`/static artifact/browser axe all pass; external prerequisites are either observed or explicitly listed.
+
+---
+
+## Fase 4 — Session Vault Multi-Tenant (2026-10-16)
+
+**Status:** Planned — awaiting implementation.
+**Specification:** `docs/specs/SPEC-session-vault.md` (approved) · Plan: `tasks/plan.md` § Session Vault Multi-Tenant.
+
+> Sections above belong to Fase 0–3 and the 2026-10-02 remediation; their open
+> checkpoints remain pending and are untouched by this section.
+
+### Phase A — Vault storage and lifecycle
+
+- [ ] **V.1: VaultStore core (sessions.sqlite)**
+  - Acceptance: `sessions.sqlite` created at `data_dir` with restrictive permissions; schema holds id, token_hash, label, encrypted cookie envelope, status, imported_at, updated_at; create/read/update/delete + token hash round-trip works; `BRIDGE_SECRET` wrong/missing key fails closed; `Debug` never prints secret material.
+  - Verify: `cargo test -p gemini-bridge-identity --test vault_test`.
+  - Files: `crates/identity/src/vault.rs` (new), `crates/identity/src/lib.rs`, `crates/identity/Cargo.toml`.
+  - Depends on: None.
+
+- [ ] **V.2: Validated lifecycle and per-session rotation**
+  - Acceptance: create probes `/app` before persisting and leaves prior row untouched on probe failure; replace-on-re-POST is atomic; per-session single-flight rotation updates only the owning session and persists the rotated `__Secure-1PSIDTS`; rotation failure flips that row to `needs_reauth`; `sorry/` flip to `ip_flagged`.
+  - Verify: `cargo test -p gemini-bridge-identity --test vault_test` (wiremock probe + concurrent rotation cases) and existing `rotation` unit tests.
+  - Files: `crates/identity/src/vault.rs`, `crates/identity/src/session.rs`, `crates/identity/src/rotation.rs`.
+  - Depends on: V.1.
+
+#### Checkpoint A — Vault core
+- [ ] V.1–V.2 focused tests pass; workspace builds; no secret value reachable from `Debug`/logs.
+
+### Phase B — HTTP auth surface
+
+- [ ] **V.3: Dual-auth middleware**
+  - Acceptance: `/v1/*` requires both api_key and `X-Session-Token`; missing/wrong api_key → `401 invalid_api_key`; missing/unknown token → `401 invalid_session_token`; session in `needs_reauth`/`ip_flagged` → `401 needs_reauth` **without any upstream call**; rate-limit bucket key is per session.
+  - Verify: `cargo test -p gemini-bridge-http-server` auth-matrix tests asserting exact status + error code and zero upstream hits.
+  - Files: `crates/http-server/src/lib.rs`, `crates/identity/src/vault.rs`.
+  - Depends on: V.2.
+
+- [ ] **V.4: `/v1/sessions` routes + test helper**
+  - Acceptance: `POST /v1/sessions` (api_key) returns `{id, token, session_status}` once; `GET /v1/sessions/current` returns only the caller's session state; `DELETE /v1/sessions/{id}` invalidates the token; unknown id/token cross-access rejected; `tests/common/` exposes a create-session helper used by HTTP tests.
+  - Verify: `cargo test -p gemini-bridge-http-server --test sessions_test` plus helper exercised by one existing HTTP test.
+  - Files: `crates/http-server/src/handlers/sessions.rs` (new), `crates/http-server/src/handlers/mod.rs`, `crates/http-server/src/lib.rs`, `tests/common/mod.rs`.
+  - Depends on: V.3.
+
+#### Checkpoint B — Client loop works
+- [ ] create session → authenticated chat with api_key + token → revoke → token rejected; review with human before wiring consumers.
+
+### Phase C — Consumer wiring and tenant scoping
+
+- [ ] **V.5: Adapter resolves session per request**
+  - Acceptance: chat completion uses the credentials of the session named in `LlmRequest.metadata["session_id"]`; two sessions in one process do not share a cookie; 405 recovery rotates only the requesting session; missing session id → typed error, never a global fallback.
+  - Verify: `cargo test -p gemini-bridge-adapter-gemini` (wiremock asserts the request Cookie header matches the owning session for two distinct sessions).
+  - Files: `crates/gemini-adapter/src/lib.rs`, `crates/http-server/src/handlers/chat.rs`, `crates/llm-service/src/lib.rs`.
+  - Depends on: V.4.
+
+- [ ] **V.6: Per-session media download**
+  - Acceptance: image/file CDN fetch presents the requesting session's cookie; the global `SessionCookieMediaDownloader` no longer resolves a single process-wide session; no cookie leaks to non-allowlisted hosts (SSRF policy unchanged).
+  - Verify: `cargo test -p gemini-bridge-upload --test media_fetch_test`, `cargo test -p gemini-bridge-image-gen`.
+  - Files: `crates/upload/src/media_fetch.rs`, `crates/image-gen/src/lib.rs`, `src/main.rs`.
+  - Depends on: V.4.
+
+- [ ] **V.7: Conversation tenant scoping**
+  - Acceptance: migration adds `session_id` to `conversations` (indexed); every list/get/branch/history/delete filters by caller session; a second session cannot read or branch another session's conversation; legacy NULL rows are claimed by the first created session and this is documented.
+  - Verify: `cargo test -p gemini-bridge-conversation-store` migration + isolation tests and `cargo test --test e2e_conversations_test`.
+  - Files: `crates/conversation-store/src/migrations.rs`, `crates/conversation-store/src/db.rs`, `crates/http-server/src/handlers/conversations.rs`.
+  - Depends on: V.4.
+
+- [ ] **V.8: Media and gallery tenant scoping**
+  - Acceptance: `media_metadata.session_id` added; gallery list/download/delete and `/v1/files|images|videos` retrieval filter by caller session; cross-session id access returns not-found, never content.
+  - Verify: `cargo test -p gemini-bridge-media-store`, `cargo test --test gallery_test`.
+  - Files: `crates/media-store/src/index.rs`, `crates/media-store/src/store.rs`, `crates/gallery/src/handlers.rs`.
+  - Depends on: V.4.
+
+#### Checkpoint C — Isolation proven
+- [ ] Two-session negative tests pass for conversations and media (no cross-tenant read).
+
+#### Checkpoint D — Consumers wired
+- [ ] chat + image + files e2e suites pass through the vault path with the session helper.
+
+### Phase D — Clean cutover
+
+- [ ] **V.9: Remove legacy session code paths**
+  - Acceptance: `cookies.json` storage module, `POST /admin/reauth`, and the global single-session identity state are deleted (no alias/shim); `AppState.identity_service` replaced by `vault`; `/readyz` reports the vault aggregate; every remaining identity entry point is session-scoped.
+  - Verify: full workspace suite passes; grep confirms no `cookies.json` / `admin/reauth` / single-session references remain in source outside changelog history.
+  - Files: `crates/identity/src/storage.rs` (delete), `crates/identity/src/session.rs`, `crates/health-admin/src/lib.rs`, `crates/http-server/src/lib.rs`.
+  - Depends on: V.5, V.6, V.7, V.8.
+
+- [ ] **V.10: Migrate operator CLI and documentation**
+  - Acceptance: `auth login` creates the first vault session from hidden stdin and never writes `cookies.json`; `doctor` reports vault-backed session state; README + `docs/operations.md` describe the client-owned flow, the dual-auth requirement, and the `401 needs_reauth` re-auth contract; `SPEC-identity.md` reflects the vault boundary.
+  - Verify: `cargo test --bin gemini-bridge` CLI tests; `cargo clippy --workspace --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check`; manual `auth login` + `doctor` smoke against a local mock.
+  - Files: `src/cli.rs`, `src/main.rs`, `README.md`, `docs/operations.md`, `docs/specs/SPEC-identity.md`.
+  - Depends on: V.9.
+
+#### Checkpoint E — Spec acceptance met
+- [ ] `SPEC-session-vault.md` §8 criteria 1–6 all demonstrated; quality gates green; human review approves cutover.
