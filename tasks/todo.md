@@ -326,14 +326,14 @@
   - Files: `crates/identity/src/vault.rs` (new), `crates/identity/src/lib.rs`, `crates/identity/Cargo.toml`.
   - Depends on: None.
 
-- [ ] **V.2: Validated lifecycle and per-session rotation**
+- [x] **V.2: Validated lifecycle and per-session rotation**
   - Acceptance: create probes `/app` before persisting and leaves prior row untouched on probe failure; replace-on-re-POST is atomic; per-session single-flight rotation updates only the owning session and persists the rotated `__Secure-1PSIDTS`; rotation failure flips that row to `needs_reauth`; `sorry/` flip to `ip_flagged`.
   - Verify: `cargo test -p gemini-bridge-identity --test vault_test` (wiremock probe + concurrent rotation cases) and existing `rotation` unit tests.
   - Files: `crates/identity/src/vault.rs`, `crates/identity/src/session.rs`, `crates/identity/src/rotation.rs`.
   - Depends on: V.1.
 
 #### Checkpoint A — Vault core
-- [ ] V.1–V.2 focused tests pass; workspace builds; no secret value reachable from `Debug`/logs.
+- [x] V.1–V.2 focused tests pass; workspace builds; no secret value reachable from `Debug`/logs.
 
 ### Phase B — HTTP auth surface
 

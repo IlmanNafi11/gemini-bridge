@@ -62,6 +62,7 @@ impl ReqwestTransport {
         let tls_profile = profile_name.parse::<TlsProfile>().unwrap_or_default();
 
         let mut builder = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(timeout)
             .read_timeout(stream_idle_timeout);
 

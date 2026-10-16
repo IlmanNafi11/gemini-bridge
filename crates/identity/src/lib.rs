@@ -11,5 +11,6 @@ pub use error::IdentityError;
 pub use model::{SessionBootstrap, SessionCredentials, SessionSnapshot, SessionStatus};
 pub use session::{DefaultIdentityService, IdentityService};
 pub use vault::{
-    NewVaultSession, VaultSession, VaultStore, generate_session_token, hash_session_token,
+    NewVaultSession, VaultService, VaultSession, VaultStore, generate_session_token,
+    hash_session_token,
 };

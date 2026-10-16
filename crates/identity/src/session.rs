@@ -314,8 +314,8 @@ impl IdentityService for DefaultIdentityService {
         Ok(bootstrap)
     }
 }
-/// Probe a candidate session without mutating the service's live state.
-async fn probe_credentials(
+/// Probe a candidate session without mutating any service's live state.
+pub(crate) async fn probe_credentials(
     transport: &ReqwestTransport,
     base_url: Option<&str>,
     credentials: &SessionCredentials,
@@ -390,7 +390,7 @@ fn insert_auth_headers(
 /// Parse the required cookies from a full `Cookie:` header string.
 ///
 /// Accepted field names: `__Secure-1PSID`, `__Secure-1PSIDTS`, `SAPISID`.
-fn parse_cookie_header(raw: &str) -> Option<SessionCredentials> {
+pub fn parse_cookie_header(raw: &str) -> Option<SessionCredentials> {
     let mut psid = None;
     let mut psidts = None;
     let mut sapisid = None;

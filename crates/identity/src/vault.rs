@@ -5,20 +5,27 @@
 //! lifecycle timestamps. Cookie material is written through the shared
 //! [`crate::crypto`] GBCK envelope and never appears in `Debug` or error text.
 //!
-//! Upstream probing and per-session rotation build on this store in V.2; V.1
-//! deliberately keeps the store synchronous and free of transport concerns.
-
+//! [`VaultService`] adds the V.2 lifecycle on top of the synchronous store:
+//! validated creation (probe `/app` before persisting) and per-session
+//! single-flight rotation. V.1's [`VaultStore`] deliberately stays free of
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+
+use gemini_bridge_config::BridgeConfig;
+use gemini_bridge_transport::ReqwestTransport;
 
 use crate::crypto;
 use crate::error::IdentityError;
 use crate::model::{SessionCredentials, SessionStatus};
-use crate::session::rfc3339_now;
+use crate::session::{parse_cookie_header, probe_credentials, rfc3339_now};
 
 /// Random bytes backing a session token (spec §5: 32 bytes `OsRng`).
 const TOKEN_BYTES: usize = 32;
@@ -397,4 +404,166 @@ fn database_and_sidecars(path: &Path) -> [PathBuf; 4] {
     let mut shm = path.as_os_str().to_owned();
     shm.push("-shm");
     [path.to_path_buf(), journal.into(), wal.into(), shm.into()]
+}
+
+// ─── V.2: validated lifecycle and per-session rotation ──────────────────────
+
+/// One rotation gate per session id, so concurrent calls for the same session
+/// coalesce while unrelated sessions rotate in parallel (spec §5: never a
+/// single global lock, never held across unrelated sessions' awaits).
+struct SessionGate {
+    lock: tokio::sync::Mutex<()>,
+    /// Incremented after each completed rotation attempt for this session.
+    /// Callers that queued behind an attempt reuse its outcome instead of
+    /// issuing a second `/app` request.
+    epoch: AtomicU64,
+}
+
+/// Validated lifecycle on top of [`VaultStore`]: creation probes `/app`
+/// before anything is persisted, and rotation is single-flight per session.
+///
+/// Shared as `Arc<VaultService>` by servers and tests; interior mutability
+/// keeps the synchronous SQLite connection usable across await points.
+pub struct VaultService {
+    transport: ReqwestTransport,
+    base_url: Option<String>,
+    gates: Mutex<HashMap<String, Arc<SessionGate>>>,
+    store: Mutex<VaultStore>,
+}
+
+impl VaultService {
+    /// Build the service from config, opening `data_dir/sessions.sqlite`.
+    pub fn new(config: &BridgeConfig, base_url: Option<String>) -> Result<Self, IdentityError> {
+        crate::crypto::validate_bridge_secret()?;
+        let transport =
+            ReqwestTransport::new(&config.transport).map_err(|_| IdentityError::Transport)?;
+        let store = VaultStore::open(config.storage.data_dir.join("sessions.sqlite"))?;
+        Ok(Self {
+            transport,
+            base_url,
+            gates: Mutex::new(HashMap::new()),
+            store: Mutex::new(store),
+        })
+    }
+
+    /// Access the underlying store (synchronous CRUD, tests, admin listings).
+    pub fn store(&self) -> parking_lot::MutexGuard<'_, VaultStore> {
+        self.store.lock()
+    }
+
+    /// Parse a raw cookie header and probe `/app`; only on success is the row
+    /// inserted or atomically replaced. A failed probe leaves any prior row
+    /// completely untouched (spec §6.1).
+    ///
+    /// Returns the persisted row; the caller generates and keeps the raw
+    /// token, which is never stored in plaintext.
+    pub async fn create_validated(
+        &self,
+        id: &str,
+        raw_token: &str,
+        label: Option<&str>,
+        raw_cookie_header: &str,
+    ) -> Result<VaultSession, IdentityError> {
+        let candidate = self.parse_candidate(raw_cookie_header)?;
+        let _ = probe_credentials(&self.transport, self.base_url.as_deref(), &candidate).await?;
+
+        // Only after upstream accepts the candidate is the row written.
+        let mut store = self.store.lock();
+        store.upsert_session(NewVaultSession {
+            id,
+            token_hash: &hash_session_token(raw_token),
+            label,
+            credentials: &candidate,
+            status: SessionStatus::Valid,
+        })
+    }
+
+    /// Rotate the session's `__Secure_1PSIDTS` (single-flight per session):
+    /// persist the rotated cookie and mark the row `Valid`, or flip the row to
+    /// `NeedsReauth` / `IpFlagged` on failure. Unrelated sessions are never
+    /// touched.
+    pub async fn rotate_session(&self, id: &str) -> Result<(), IdentityError> {
+        let gate = self.gate(id);
+        let observed_epoch = gate.epoch.load(Ordering::Acquire);
+        let _guard = gate.lock.lock().await;
+
+        // Re-check after acquiring the lock: an earlier attempt may have
+        // already finished this rotation.
+        if gate.epoch.load(Ordering::Acquire) != observed_epoch {
+            return match self.store.lock().get(id).map(|row| row.map(|r| r.status)) {
+                Ok(Some(SessionStatus::Valid)) => Ok(()),
+                Ok(Some(SessionStatus::IpFlagged)) => Err(IdentityError::IpFlagged),
+                Ok(_) => Err(IdentityError::NeedsReauth),
+                Err(error) => Err(error),
+            };
+        }
+
+        let outcome = {
+            let store = self.store.lock();
+            let row = store.get(id)?.ok_or(IdentityError::MissingCredentials)?;
+            if matches!(
+                row.status,
+                SessionStatus::NeedsReauth | SessionStatus::IpFlagged
+            ) {
+                // Dead sessions fail fast; recovery is client re-auth (US-1).
+                return Err(if matches!(row.status, SessionStatus::IpFlagged) {
+                    IdentityError::IpFlagged
+                } else {
+                    IdentityError::NeedsReauth
+                });
+            }
+            store
+                .session_cookies(id)?
+                .ok_or(IdentityError::MissingCredentials)?
+        };
+        let result =
+            crate::rotation::execute_rotation(&self.transport, self.base_url.as_deref(), &outcome)
+                .await;
+
+        let mut store = self.store.lock();
+        match result {
+            Ok(rotated) => {
+                let updated = SessionCredentials {
+                    psid: outcome.psid,
+                    psidts: rotated.psidts,
+                    sapisid: outcome.sapisid,
+                    imported_at: rfc3339_now(),
+                };
+                store.update_cookies(id, &updated)?;
+                store.update_status(id, SessionStatus::Valid)?;
+                gate.epoch.fetch_add(1, Ordering::Release);
+                Ok(())
+            }
+            Err(error) => {
+                let status = if matches!(error, IdentityError::IpFlagged) {
+                    SessionStatus::IpFlagged
+                } else {
+                    SessionStatus::NeedsReauth
+                };
+                store.update_status(id, status)?;
+                gate.epoch.fetch_add(1, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    /// Gate map lookup, creating the per-session lock on first use.
+    fn gate(&self, id: &str) -> Arc<SessionGate> {
+        let mut gates = self.gates.lock();
+        gates
+            .entry(id.to_owned())
+            .or_insert_with(|| {
+                Arc::new(SessionGate {
+                    lock: tokio::sync::Mutex::new(()),
+                    epoch: AtomicU64::new(0),
+                })
+            })
+            .clone()
+    }
+    fn parse_candidate(
+        &self,
+        raw_cookie_header: &str,
+    ) -> Result<SessionCredentials, IdentityError> {
+        parse_cookie_header(raw_cookie_header).ok_or(IdentityError::MissingCredentials)
+    }
 }
