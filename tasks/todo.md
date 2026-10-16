@@ -320,7 +320,7 @@
 
 ### Phase A — Vault storage and lifecycle
 
-- [ ] **V.1: VaultStore core (sessions.sqlite)**
+- [x] **V.1: VaultStore core (sessions.sqlite)**
   - Acceptance: `sessions.sqlite` created at `data_dir` with restrictive permissions; schema holds id, token_hash, label, encrypted cookie envelope, status, imported_at, updated_at; create/read/update/delete + token hash round-trip works; `BRIDGE_SECRET` wrong/missing key fails closed; `Debug` never prints secret material.
   - Verify: `cargo test -p gemini-bridge-identity --test vault_test`.
   - Files: `crates/identity/src/vault.rs` (new), `crates/identity/src/lib.rs`, `crates/identity/Cargo.toml`.

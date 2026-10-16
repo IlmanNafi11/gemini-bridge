@@ -20,6 +20,8 @@ pub enum IdentityError {
     Storage,
     #[error("Legacy credential rewrap failed; original ciphertext was preserved")]
     LegacyCredentialRewrap,
+    #[error("Session vault error: {0}")]
+    Vault(String),
     #[error("Transport request failed")]
     Transport,
 }

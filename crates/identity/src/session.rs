@@ -431,7 +431,7 @@ fn load_credentials(cfg: &StorageConfig) -> Result<Option<SessionCredentials>, I
 }
 
 /// Produce a minimal RFC3339 timestamp using only stdlib.
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
