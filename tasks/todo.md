@@ -343,14 +343,15 @@
   - Files: `crates/http-server/src/lib.rs`, `crates/identity/src/vault.rs`.
   - Depends on: V.2.
 
-- [ ] **V.4: `/v1/sessions` routes + test helper**
+- [x] **V.4: `/v1/sessions` routes + test helper**
   - Acceptance: `POST /v1/sessions` (api_key) returns `{id, token, session_status}` once; `GET /v1/sessions/current` returns only the caller's session state; `DELETE /v1/sessions/{id}` invalidates the token; unknown id/token cross-access rejected; `tests/common/` exposes a create-session helper used by HTTP tests.
   - Verify: `cargo test -p gemini-bridge-http-server --test sessions_test` plus helper exercised by one existing HTTP test.
   - Files: `crates/http-server/src/handlers/sessions.rs` (new), `crates/http-server/src/handlers/mod.rs`, `crates/http-server/src/lib.rs`, `tests/common/mod.rs`.
   - Depends on: V.3.
 
 #### Checkpoint B — Client loop works
-- [ ] create session → authenticated chat with api_key + token → revoke → token rejected; review with human before wiring consumers.
+
+- [x] create session → authenticated chat with api_key + token → revoke → token rejected; review with human before wiring consumers.
 
 ### Phase C — Consumer wiring and tenant scoping
 

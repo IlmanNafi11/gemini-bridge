@@ -236,6 +236,33 @@ pub fn build_router_with_options(
     let metrics = config
         .metrics_enabled
         .then(|| Arc::new(HttpMetrics::default()));
+    // Session management routes (Fase 4). These sit outside the dual-auth
+    // layer: `POST /v1/sessions` runs before any token exists, and the
+    // token-based endpoints do their own resolution against the vault, so
+    // this sub-router enforces api_key only.
+    let sessions_routes = Router::new()
+        .route(
+            "/v1/sessions",
+            routing::post(handlers::sessions::create_session),
+        )
+        .route(
+            "/v1/sessions/current",
+            routing::get(handlers::sessions::current_session),
+        )
+        .route(
+            "/v1/sessions/{id}",
+            routing::delete(handlers::sessions::delete_session),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            PublicMiddlewareState {
+                api_key: api_key.clone(),
+                rate_limiter: config.rate_limit.map(TokenBucketLimiter::new).map(Arc::new),
+                unauthenticated_loopback: config.bind_addr.ip().is_loopback()
+                    && config.api_key.is_none(),
+                vault: None,
+            },
+            public_middleware,
+        ));
     let public_routes = Router::new()
         .route(
             "/v1/chat/completions",
@@ -329,6 +356,7 @@ pub fn build_router_with_options(
     ));
 
     let mut router = Router::new()
+        .merge(sessions_routes)
         .merge(public_routes)
         .merge(health_routes)
         .merge(admin_routes)

@@ -73,6 +73,19 @@ pub fn generate_session_token() -> String {
     format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Random bytes backing a session id (spec §5: 16 bytes).
+const SESSION_ID_BYTES: usize = 16;
+
+/// Generate a fresh session id: `ses_` + 16 random bytes, URL-safe. Distinct
+/// namespace from the token so an id can never be replayed as a credential.
+pub fn generate_session_id() -> String {
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
+
+    let mut bytes = [0_u8; SESSION_ID_BYTES];
+    OsRng.fill_bytes(&mut bytes);
+    format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
 /// Hash a session token for storage. The raw token is never persisted.
 pub fn hash_session_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
