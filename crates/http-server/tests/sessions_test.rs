@@ -87,7 +87,6 @@ fn free_port() -> u16 {
 }
 
 struct Spawned {
-    port: u16,
     /// Base URL of the running bridge, e.g. `http://127.0.0.1:PORT`.
     base_url: String,
     adapter: Arc<RecordingAdapter>,
@@ -173,7 +172,9 @@ async fn spawn_with_probe_budget(probe_times: u64) -> (Spawned, MockServer) {
         metrics_enabled: false,
     };
     let router = build_router(srv_config, state);
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -182,7 +183,6 @@ async fn spawn_with_probe_budget(probe_times: u64) -> (Spawned, MockServer) {
     sleep(Duration::from_millis(50)).await;
 
     let spawned = Spawned {
-        port,
         base_url: format!("http://127.0.0.1:{port}"),
         adapter,
         vault,
@@ -202,13 +202,8 @@ async fn spawn() -> (Spawned, MockServer) {
 async fn create_session_returns_id_token_status_and_token_authenticates_chat() {
     let (spawned, _upstream) = spawn().await;
 
-    let (status, body) = common::create_session(
-        &spawned.base_url,
-        API_KEY,
-        COOKIE_OK,
-        Some("client-a"),
-    )
-    .await;
+    let (status, body) =
+        common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("client-a")).await;
     assert_eq!(status, reqwest::StatusCode::OK, "body: {body}");
     assert_eq!(body["session_status"], "valid");
     let token = body["token"].as_str().expect("token present");
@@ -223,7 +218,9 @@ async fn create_session_returns_id_token_status_and_token_authenticates_chat() {
         .post(format!("{}/v1/chat/completions", spawned.base_url))
         .bearer_auth(API_KEY)
         .header("x-session-token", token)
-        .json(&json!({"model": "gemini-web-flash", "messages": [{"role": "user", "content": "hi"}]}))
+        .json(
+            &json!({"model": "gemini-web-flash", "messages": [{"role": "user", "content": "hi"}]}),
+        )
         .send()
         .await
         .expect("chat request succeeds");
@@ -256,25 +253,15 @@ async fn failed_probe_returns_error_and_preserves_prior_session() {
     // Budget 1: the first create consumes the OK probe; the re-POST hits 401.
     let (spawned, _upstream) = spawn_with_probe_budget(1).await;
 
-    let (status, body) = common::create_session(
-        &spawned.base_url,
-        API_KEY,
-        COOKIE_OK,
-        Some("client-a"),
-    )
-    .await;
+    let (status, body) =
+        common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("client-a")).await;
     assert_eq!(status, reqwest::StatusCode::OK, "body: {body}");
     let token = body["token"].as_str().unwrap().to_owned();
     let id = body["id"].as_str().unwrap().to_owned();
 
     // Re-POST with an invalid-probe cookie → 4xx with an error body.
-    let (repost_status, repost_body) = common::create_session(
-        &spawned.base_url,
-        API_KEY,
-        COOKIE_OK,
-        Some("client-a"),
-    )
-    .await;
+    let (repost_status, repost_body) =
+        common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("client-a")).await;
     assert!(
         repost_status.is_client_error() || repost_status.is_server_error(),
         "probe failure must be an error, got {repost_status}"
@@ -358,7 +345,9 @@ async fn delete_invalidates_token_for_subsequent_requests() {
         .post(format!("{}/v1/chat/completions", spawned.base_url))
         .bearer_auth(API_KEY)
         .header("x-session-token", &token)
-        .json(&json!({"model": "gemini-web-flash", "messages": [{"role": "user", "content": "hi"}]}))
+        .json(
+            &json!({"model": "gemini-web-flash", "messages": [{"role": "user", "content": "hi"}]}),
+        )
         .send()
         .await
         .expect("chat request succeeds");
@@ -383,8 +372,10 @@ async fn delete_invalidates_token_for_subsequent_requests() {
 async fn cross_tenant_delete_is_rejected() {
     let (spawned, _upstream) = spawn().await;
 
-    let (_, body_a) = common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("a")).await;
-    let (_, body_b) = common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("b")).await;
+    let (_, body_a) =
+        common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("a")).await;
+    let (_, body_b) =
+        common::create_session(&spawned.base_url, API_KEY, COOKIE_OK, Some("b")).await;
     let token_a = body_a["token"].as_str().unwrap().to_owned();
     let id_b = body_b["id"].as_str().unwrap().to_owned();
 
@@ -422,7 +413,10 @@ async fn delete_unknown_id_is_rejected_not_500() {
     let token = body["token"].as_str().unwrap().to_owned();
 
     let response = reqwest::Client::new()
-        .delete(format!("{}/v1/sessions/ses-does-not-exist", spawned.base_url))
+        .delete(format!(
+            "{}/v1/sessions/ses-does-not-exist",
+            spawned.base_url
+        ))
         .bearer_auth(API_KEY)
         .header("x-session-token", &token)
         .send()

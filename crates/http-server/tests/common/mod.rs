@@ -34,6 +34,9 @@ pub async fn create_session(
         .await
         .expect("create-session request succeeds");
     let status = response.status();
-    let parsed: Value = response.json().await.unwrap_or(json!({"parse_error": true}));
+    let parsed: Value = response
+        .json()
+        .await
+        .unwrap_or(json!({"parse_error": true}));
     (status, parsed)
 }

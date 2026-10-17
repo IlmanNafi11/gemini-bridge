@@ -130,7 +130,11 @@ pub async fn delete_session(
 
     match vault.store().delete(&id) {
         Ok(true) => (StatusCode::OK, Json(json!({"deleted": true, "id": id}))).into_response(),
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "Session not found", "session_not_found"),
+        Ok(false) => error_response(
+            StatusCode::NOT_FOUND,
+            "Session not found",
+            "session_not_found",
+        ),
         Err(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Session deletion failed",
@@ -218,18 +222,22 @@ fn create_error(error: IdentityError) -> Response {
             "upstream_unavailable",
             "api_error",
         ),
-        IdentityError::Storage | IdentityError::Vault(_) | IdentityError::LegacyCredentialRewrap => (
+        IdentityError::Storage
+        | IdentityError::Vault(_)
+        | IdentityError::LegacyCredentialRewrap => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Session persistence failed",
             "session_persistence_failed",
             "server_error",
         ),
-        IdentityError::CandidateValidationUnsupported | IdentityError::MissingBootstrapField(_) => (
-            StatusCode::BAD_GATEWAY,
-            "Upstream response could not be validated",
-            "upstream_invalid",
-            "api_error",
-        ),
+        IdentityError::CandidateValidationUnsupported | IdentityError::MissingBootstrapField(_) => {
+            (
+                StatusCode::BAD_GATEWAY,
+                "Upstream response could not be validated",
+                "upstream_invalid",
+                "api_error",
+            )
+        }
     };
     (
         status,
