@@ -105,6 +105,7 @@ async fn test_server() -> (
         video_service: None,
         health_admin: Arc::new(DefaultHealthAdminService::new(None)),
         identity_service: None,
+        vault: None,
         conversation_store: Some(store.clone()),
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,

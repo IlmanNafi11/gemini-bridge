@@ -93,6 +93,7 @@ async fn spawn_server(
         video_service: None,
         health_admin,
         identity_service: Some(Arc::new(LocalIdentity)),
+        vault: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: None,

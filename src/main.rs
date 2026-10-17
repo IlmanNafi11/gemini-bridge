@@ -134,6 +134,13 @@ async fn run_server(config: BridgeConfig) -> Result<(), String> {
         DefaultHealthAdminService::new(Some(identity_svc.clone())).with_reloader(reloader),
     );
 
+    // Multi-tenant session vault (Fase 4): `sessions.sqlite` under data_dir.
+    // Fails fast at startup when `BRIDGE_SECRET` is weak.
+    let vault: Option<Arc<gemini_bridge_identity::VaultService>> = Some(Arc::new(
+        gemini_bridge_identity::VaultService::new(&config, None)
+            .map_err(|error| format!("session vault initialization failed: {error}"))?,
+    ));
+
     let bind_addr = format!("{}:{}", config.server.bind_addr, config.server.port)
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid bind address: {error}"))?;
@@ -144,6 +151,7 @@ async fn run_server(config: BridgeConfig) -> Result<(), String> {
         video_service: None,
         health_admin,
         identity_service: Some(identity_svc),
+        vault,
         conversation_store,
         tool_engine: build_tool_engine(),
         gallery_service,

@@ -74,6 +74,7 @@ async fn spawn_server_with_key(
         video_service: None,
         health_admin: gemini_bridge_http_server::build_health_admin(None),
         identity_service: None,
+        vault: None,
         conversation_store: None,
         tool_engine: gemini_bridge_http_server::build_tool_engine(),
         gallery_service: Some(gallery_service),

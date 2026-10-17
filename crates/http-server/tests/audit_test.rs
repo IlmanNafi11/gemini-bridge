@@ -77,6 +77,7 @@ async fn completed_request_emits_structured_audit_event_with_response_request_id
             video_service: None,
             health_admin: Arc::new(DefaultHealthAdminService::new(None)),
             identity_service: None,
+            vault: None,
             conversation_store: None,
             tool_engine: Arc::new(DefaultToolEngine),
             gallery_service: None,

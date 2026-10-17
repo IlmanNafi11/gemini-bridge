@@ -109,6 +109,9 @@ struct PublicMiddlewareState {
     api_key: Option<String>,
     rate_limiter: Option<Arc<TokenBucketLimiter>>,
     unauthenticated_loopback: bool,
+    /// When present, `/v1/*` additionally requires a valid `X-Session-Token`
+    /// naming a vault session; resolved session id attaches as an extension.
+    vault: Option<Arc<gemini_bridge_identity::VaultService>>,
 }
 #[derive(Clone)]
 struct DeleteAuthCheckState {
@@ -188,6 +191,9 @@ pub struct AppState {
     /// Identity service carried for future observability and audit contexts.
     /// Rotation itself is adapter-owned; `None` is acceptable.
     pub identity_service: Option<Arc<dyn gemini_bridge_identity::IdentityService>>,
+    /// Multi-tenant session vault; `None` leaves `/v1/*` on api_key-only auth
+    /// (legacy single-operator mode until the Fase 4 cutover).
+    pub vault: Option<Arc<gemini_bridge_identity::VaultService>>,
     /// Conversation persistence; `None` disables `/v1/conversations` routes.
     pub conversation_store: Option<Arc<dyn ConversationStore>>,
     /// Tool-calling translation, validation, and continuation engine.
@@ -290,6 +296,7 @@ pub fn build_router_with_options(
                 rate_limiter: config.rate_limit.map(TokenBucketLimiter::new).map(Arc::new),
                 unauthenticated_loopback: config.bind_addr.ip().is_loopback()
                     && config.api_key.is_none(),
+                vault: state.vault.clone(),
             },
             public_middleware,
         ));
@@ -480,7 +487,7 @@ async fn endpoint_error_middleware(request: Request, next: Next) -> Response {
 async fn public_middleware(
     State(state): State<PublicMiddlewareState>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if let Some(expected) = &state.api_key {
@@ -513,18 +520,38 @@ async fn public_middleware(
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     }
 
+    // Dual-auth (Fase 4): with a vault present, `/v1/*` additionally requires a
+    // valid `X-Session-Token`. Resolution happens here — fail-fast codes
+    // (`invalid_session_token`, `needs_reauth`) short-circuit before the
+    // handler and therefore before any upstream call.
+    let session_id = if let Some(vault) = &state.vault {
+        match resolve_session(vault, &headers) {
+            Ok(session) => Some(session.id),
+            Err(rejection) => return (StatusCode::UNAUTHORIZED, Json(rejection)).into_response(),
+        }
+    } else {
+        None
+    };
+
     if let Some(limiter) = &state.rate_limiter {
-        let client_id = if state.api_key.is_some() {
-            "authenticated"
+        // Bucket per tenant: the session id when one is resolved, falling back
+        // to the legacy single-bucket keys when no vault is configured.
+        let client_id = if let Some(session) = &session_id {
+            format!(
+                "{:x}:{session}",
+                fxhash64(state.api_key.as_deref().unwrap_or(""))
+            )
+        } else if state.api_key.is_some() {
+            "authenticated".to_owned()
         } else {
-            "anonymous"
+            "anonymous".to_owned()
         };
         if let AdmissionDecision::Reject {
             retry_after,
             error_type,
             error_code,
             ..
-        } = limiter.try_acquire(client_id, SystemTime::now())
+        } = limiter.try_acquire(&client_id, SystemTime::now())
         {
             let retry_after_secs = retry_after.as_secs().max(1);
             let body =
@@ -537,7 +564,75 @@ async fn public_middleware(
                 .into_response();
         }
     }
+    if let Some(session) = session_id {
+        request
+            .extensions_mut()
+            .insert(ResolvedSession { id: session });
+    }
     next.run(request).await
+}
+
+/// Resolved tenant session attached to the request by the dual-auth middleware.
+#[derive(Clone, Debug)]
+pub struct ResolvedSession {
+    pub id: String,
+}
+
+/// Resolve the `X-Session-Token` header against the vault. Returns the exact
+/// rejection envelope the middleware must emit; the upstream is never touched.
+fn resolve_session(
+    vault: &gemini_bridge_identity::VaultService,
+    headers: &HeaderMap,
+) -> Result<gemini_bridge_identity::VaultSession, OpenAiErrorResponse> {
+    use gemini_bridge_identity::{SessionStatus, hash_session_token};
+
+    let Some(token) = headers.get("x-session-token").and_then(|v| v.to_str().ok()) else {
+        return Err(OpenAiErrorResponse::with_code(
+            "Missing session token",
+            "authentication_error",
+            "invalid_session_token",
+        ));
+    };
+
+    let row = vault
+        .store()
+        .find_by_token_hash(&hash_session_token(token))
+        .map_err(|_| {
+            OpenAiErrorResponse::with_code(
+                "Session lookup failed",
+                "authentication_error",
+                "invalid_session_token",
+            )
+        })?
+        .ok_or_else(|| {
+            OpenAiErrorResponse::with_code(
+                "Invalid session token",
+                "authentication_error",
+                "invalid_session_token",
+            )
+        })?;
+
+    match row.status {
+        SessionStatus::NeedsReauth | SessionStatus::IpFlagged => {
+            Err(OpenAiErrorResponse::with_code(
+                "Session requires re-authentication",
+                "authentication_error",
+                "needs_reauth",
+            ))
+        }
+        _ => Ok(row),
+    }
+}
+
+/// Small non-cryptographic hash for rate-limit bucket keys. The api_key never
+/// appears in the key itself; only a digest does.
+fn fxhash64(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
 }
 
 fn is_cross_origin_browser_request(headers: &HeaderMap, request_uri: &Uri) -> bool {

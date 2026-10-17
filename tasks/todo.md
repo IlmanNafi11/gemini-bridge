@@ -337,7 +337,7 @@
 
 ### Phase B — HTTP auth surface
 
-- [ ] **V.3: Dual-auth middleware**
+- [x] **V.3: Dual-auth middleware**
   - Acceptance: `/v1/*` requires both api_key and `X-Session-Token`; missing/wrong api_key → `401 invalid_api_key`; missing/unknown token → `401 invalid_session_token`; session in `needs_reauth`/`ip_flagged` → `401 needs_reauth` **without any upstream call**; rate-limit bucket key is per session.
   - Verify: `cargo test -p gemini-bridge-http-server` auth-matrix tests asserting exact status + error code and zero upstream hits.
   - Files: `crates/http-server/src/lib.rs`, `crates/identity/src/vault.rs`.
